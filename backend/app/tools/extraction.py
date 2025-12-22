@@ -26,7 +26,7 @@ class ExtractedSignal:
 class SignalExtractor:
     """Extract bankruptcy signals from filing text using GPT-4o."""
 
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-4o-mini"):
         self.client = OpenAI(api_key=settings.openai_api_key)
         self.model = model
 

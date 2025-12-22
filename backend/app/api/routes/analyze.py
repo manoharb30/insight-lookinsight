@@ -80,7 +80,12 @@ async def run_analysis_pipeline(job_id: str, ticker: str):
         jobs[job_id]["result"] = result
 
         # Cache result in Supabase
-        await supabase_service.cache_analysis(ticker, result)
+        await supabase_service.cache_analysis(
+            ticker=ticker,
+            cik=result.get("cik", ""),
+            company_name=result.get("company_name", ""),
+            result=result,
+        )
 
     except Exception as e:
         jobs[job_id]["status"] = "failed"
