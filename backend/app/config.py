@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # SEC EDGAR
     sec_user_agent: str = "InsightLookinsight contact@lookinsight.ai"
 
+    # Redis (for Celery task queue)
+    redis_url: str = "redis://localhost:6379/0"
+
     # App settings
     debug: bool = True
     api_v1_prefix: str = "/api/v1"

@@ -63,7 +63,8 @@ class APIClient {
     jobId: string,
     onUpdate: (update: StreamUpdate) => void,
     onComplete: (result: AnalysisResult) => void,
-    onError: (error: string) => void
+    onError: (error: string) => void,
+    onCancelled?: () => void
   ): () => void {
     const eventSource = new EventSource(`${this.baseUrl}/api/v1/stream/${jobId}`);
 
@@ -86,6 +87,16 @@ class APIClient {
         onError("Failed to parse analysis result");
         eventSource.close();
       }
+    });
+
+    eventSource.addEventListener("cancelled", (event) => {
+      console.log("Analysis was cancelled:", event.data);
+      if (onCancelled) {
+        onCancelled();
+      } else {
+        onError("Analysis was cancelled");
+      }
+      eventSource.close();
     });
 
     eventSource.addEventListener("error", (event) => {
@@ -124,6 +135,15 @@ class APIClient {
         ticker1: ticker1.toUpperCase(),
         ticker2: ticker2.toUpperCase(),
       }),
+    });
+  }
+
+  /**
+   * Cancel a running analysis job
+   */
+  async cancelAnalysis(jobId: string): Promise<{ job_id: string; cancelled: boolean; message: string }> {
+    return this.fetch(`/api/v1/analyze/${jobId}/cancel`, {
+      method: "POST",
     });
   }
 

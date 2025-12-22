@@ -1,18 +1,24 @@
+"""Analysis API routes with Celery task queue and cancellation support."""
+
 import uuid
 import asyncio
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+import json
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from typing import Optional
-import json
 
-from app.agents.orchestrator import AnalysisPipeline
+from app.tasks import (
+    run_analysis_task,
+    cancel_analysis_task,
+    get_job_status,
+    set_job_status,
+)
 from app.services.supabase_service import supabase_service
+from app.core.logging import get_logger
 
+logger = get_logger(__name__)
 router = APIRouter()
-
-# In-memory job store (use Redis in production)
-jobs: dict = {}
 
 
 class AnalyzeRequest(BaseModel):
@@ -25,11 +31,14 @@ class AnalyzeResponse(BaseModel):
     cached: bool = False
 
 
+class CancelResponse(BaseModel):
+    job_id: str
+    cancelled: bool
+    message: str
+
+
 @router.post("/analyze", response_model=AnalyzeResponse)
-async def start_analysis(
-    request: AnalyzeRequest,
-    background_tasks: BackgroundTasks,
-):
+async def start_analysis(request: AnalyzeRequest):
     """Start a new analysis job for the given ticker."""
     ticker = request.ticker.upper().strip()
 
@@ -47,7 +56,9 @@ async def start_analysis(
 
     # Create new job
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {
+
+    # Initialize job status in Redis
+    set_job_status(job_id, {
         "id": job_id,
         "ticker": ticker,
         "status": "pending",
@@ -56,90 +67,143 @@ async def start_analysis(
         "progress": 0,
         "signals_found": 0,
         "result": None,
-    }
+    })
 
-    # Start pipeline in background
-    background_tasks.add_task(run_analysis_pipeline, job_id, ticker)
+    # Start Celery task
+    task = run_analysis_task.delay(job_id=job_id, ticker=ticker)
+
+    # Store task ID for cancellation
+    set_job_status(job_id, {
+        "id": job_id,
+        "ticker": ticker,
+        "status": "processing",
+        "current_stage": "initializing",
+        "message": "Starting analysis...",
+        "progress": 0,
+        "signals_found": 0,
+        "result": None,
+        "task_id": task.id,
+    })
+
+    logger.info(f"Started analysis job {job_id} (task: {task.id}) for {ticker}")
 
     return AnalyzeResponse(job_id=job_id, status="processing")
 
 
-async def run_analysis_pipeline(job_id: str, ticker: str):
-    """Run the multi-agent analysis pipeline."""
-    try:
-        jobs[job_id]["status"] = "processing"
-        jobs[job_id]["current_stage"] = "fetching"
-        jobs[job_id]["message"] = "Fetching SEC filings..."
+@router.post("/analyze/{job_id}/cancel", response_model=CancelResponse)
+async def cancel_analysis(job_id: str):
+    """Cancel a running analysis job."""
+    job_status = get_job_status(job_id)
 
-        pipeline = AnalysisPipeline(job_id, jobs)
-        result = await pipeline.run(ticker)
+    if not job_status:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-        jobs[job_id]["status"] = "completed"
-        jobs[job_id]["current_stage"] = "complete"
-        jobs[job_id]["progress"] = 100
-        jobs[job_id]["result"] = result
+    current_status = job_status.get("status")
 
-        # Cache result in Supabase
-        await supabase_service.cache_analysis(
-            ticker=ticker,
-            cik=result.get("cik", ""),
-            company_name=result.get("company_name", ""),
-            result=result,
+    # Can only cancel pending or processing jobs
+    if current_status in ["completed", "failed", "cancelled"]:
+        return CancelResponse(
+            job_id=job_id,
+            cancelled=False,
+            message=f"Job already {current_status}, cannot cancel",
         )
 
-    except Exception as e:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["message"] = str(e)
-        print(f"Analysis failed for {ticker}: {e}")
+    # Cancel the Celery task
+    success = cancel_analysis_task(job_id)
+
+    if success:
+        return CancelResponse(
+            job_id=job_id,
+            cancelled=True,
+            message="Analysis cancelled successfully",
+        )
+    else:
+        return CancelResponse(
+            job_id=job_id,
+            cancelled=False,
+            message="Could not cancel task (may have already completed)",
+        )
 
 
 @router.get("/analyze/{job_id}")
 async def get_analysis_status(job_id: str):
     """Get the status of an analysis job."""
-    if job_id not in jobs:
-        # Check Supabase for cached result
-        cached = await supabase_service.get_analysis_by_id(job_id)
-        if cached:
-            return cached
-        raise HTTPException(status_code=404, detail="Job not found")
+    # Check Redis first
+    job_status = get_job_status(job_id)
+    if job_status:
+        return job_status
 
-    return jobs[job_id]
+    # Check Supabase for cached result
+    cached = await supabase_service.get_analysis_by_id(job_id)
+    if cached:
+        return cached
+
+    raise HTTPException(status_code=404, detail="Job not found")
 
 
 @router.get("/stream/{job_id}")
-async def stream_analysis(job_id: str):
-    """SSE stream for real-time analysis updates."""
+async def stream_analysis(job_id: str, request: Request):
+    """
+    SSE stream for real-time analysis updates.
+
+    Automatically cancels the task if client disconnects.
+    """
 
     async def event_generator():
-        while True:
-            if job_id not in jobs:
-                yield {
-                    "event": "error",
-                    "data": json.dumps({"error": "Job not found"}),
-                }
-                break
+        try:
+            while True:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    logger.info(f"Client disconnected for job {job_id}, cancelling task")
+                    cancel_analysis_task(job_id)
+                    break
 
-            status = jobs[job_id]
+                status = get_job_status(job_id)
 
-            yield {
-                "event": "update",
-                "data": json.dumps(
-                    {
-                        "stage": status["current_stage"],
-                        "message": status["message"],
-                        "progress": status["progress"],
-                        "signals_found": status["signals_found"],
+                if not status:
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({"error": "Job not found"}),
                     }
-                ),
-            }
+                    break
 
-            if status["status"] in ["completed", "failed"]:
                 yield {
-                    "event": "complete",
-                    "data": json.dumps(status.get("result") or {"error": status.get("message")}),
+                    "event": "update",
+                    "data": json.dumps(
+                        {
+                            "stage": status.get("current_stage", "unknown"),
+                            "message": status.get("message", ""),
+                            "progress": status.get("progress", 0),
+                            "signals_found": status.get("signals_found", 0),
+                        }
+                    ),
                 }
-                break
 
-            await asyncio.sleep(1)
+                job_status = status.get("status")
+                if job_status in ["completed", "failed", "cancelled"]:
+                    if job_status == "completed":
+                        yield {
+                            "event": "complete",
+                            "data": json.dumps(status.get("result") or {}),
+                        }
+                    elif job_status == "cancelled":
+                        yield {
+                            "event": "cancelled",
+                            "data": json.dumps({"message": "Analysis was cancelled"}),
+                        }
+                    else:
+                        yield {
+                            "event": "error",
+                            "data": json.dumps({"error": status.get("message", "Analysis failed")}),
+                        }
+                    break
+
+                await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            # Client disconnected, cancel the task
+            logger.info(f"SSE cancelled for job {job_id}, cancelling task")
+            cancel_analysis_task(job_id)
+            raise
 
     return EventSourceResponse(event_generator())

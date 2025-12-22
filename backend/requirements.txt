@@ -25,3 +25,7 @@ httpx>=0.26.0
 # Embeddings & chunking
 tiktoken>=0.6.0
 langchain-text-splitters>=0.0.1
+
+# Task Queue
+celery[redis]>=5.3.0
+redis>=5.0.0

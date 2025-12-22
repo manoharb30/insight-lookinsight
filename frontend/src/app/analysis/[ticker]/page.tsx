@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
@@ -30,6 +30,8 @@ export default function AnalysisPage() {
   const [stages, setStages] = useState<Stage[]>(INITIAL_STAGES);
   const [signalsFound, setSignalsFound] = useState(0);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const jobIdRef = useRef<string | null>(null);
+  const isCompletedRef = useRef(false);
 
   const updateStageFromMessage = useCallback((update: StreamUpdate) => {
     setSignalsFound(update.signals_found || 0);
@@ -64,16 +66,32 @@ export default function AnalysisPage() {
     });
   }, []);
 
+  // Cancel analysis when leaving the page
+  const cancelAnalysis = useCallback(async () => {
+    if (jobIdRef.current && !isCompletedRef.current) {
+      try {
+        await api.cancelAnalysis(jobIdRef.current);
+      } catch (e) {
+        // Ignore errors during cancellation
+        console.log("Cancel request failed (may have already completed):", e);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (!ticker) return;
+
+    let cleanup: (() => void) | undefined;
 
     const startAnalysis = async () => {
       try {
         // Start analysis
         const response = await api.startAnalysis(ticker);
+        jobIdRef.current = response.job_id;
 
         if (response.cached) {
           // Get cached result
+          isCompletedRef.current = true;
           const cachedResult = await api.getJobStatus(response.job_id);
           if (cachedResult.result) {
             setResult(cachedResult.result);
@@ -84,31 +102,51 @@ export default function AnalysisPage() {
         }
 
         // Subscribe to SSE stream
-        const cleanup = api.subscribeToStream(
+        cleanup = api.subscribeToStream(
           response.job_id,
           (update) => {
             updateStageFromMessage(update);
           },
           (analysisResult) => {
+            isCompletedRef.current = true;
             setResult(analysisResult);
             setStages((prev) => prev.map((s) => ({ ...s, status: "completed" as const })));
             setIsLoading(false);
           },
           (errorMsg) => {
+            isCompletedRef.current = true;
             setError(errorMsg);
             setIsLoading(false);
           }
         );
-
-        return cleanup;
       } catch (err) {
+        isCompletedRef.current = true;
         setError(err instanceof Error ? err.message : "Failed to start analysis");
         setIsLoading(false);
       }
     };
 
+    // Handle browser close/refresh
+    const handleBeforeUnload = () => {
+      if (jobIdRef.current && !isCompletedRef.current) {
+        // Use sendBeacon for reliable delivery on page unload
+        navigator.sendBeacon(
+          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/analyze/${jobIdRef.current}/cancel`
+        );
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
     startAnalysis();
-  }, [ticker, updateStageFromMessage]);
+
+    // Cleanup on unmount (navigation away)
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      if (cleanup) cleanup();
+      cancelAnalysis();
+    };
+  }, [ticker, updateStageFromMessage, cancelAnalysis]);
 
   if (error) {
     return (
