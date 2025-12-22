@@ -82,6 +82,7 @@ class AnalysisPipeline:
 
             extraction_result = await extractor_agent.run(
                 ticker=ticker,
+                cik=fetch_result.cik,
                 company_name=fetch_result.company_name,
                 filings=fetch_result.filings,
                 store_embeddings=True,

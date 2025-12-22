@@ -36,6 +36,7 @@ class SignalExtractorAgent:
     async def run(
         self,
         ticker: str,
+        cik: str,
         company_name: str,
         filings: List[Dict[str, Any]],
         store_embeddings: bool = True,
@@ -46,6 +47,7 @@ class SignalExtractorAgent:
 
         Args:
             ticker: Stock ticker
+            cik: Company CIK
             company_name: Company name
             filings: List of filing data from fetcher
             store_embeddings: Whether to store chunk embeddings in Supabase
@@ -87,9 +89,10 @@ class SignalExtractorAgent:
                         for i in range(len(chunks))
                     ]
 
-                    await supabase_service.store_filing_chunks(
+                    await supabase_service.store_filing_chunks_batch(
                         ticker=ticker,
-                        filing_accession=filing["accession_number"],
+                        cik=cik,
+                        accession_number=filing["accession_number"],
                         filing_type=filing["filing_type"],
                         chunks=chunk_data,
                     )

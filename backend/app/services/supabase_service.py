@@ -184,7 +184,8 @@ class SupabaseService:
     async def store_filing_chunk(
         self,
         ticker: str,
-        filing_accession: str,
+        cik: str,
+        accession_number: str,
         filing_type: str,
         item_number: str,
         content: str,
@@ -196,7 +197,8 @@ class SupabaseService:
 
         Args:
             ticker: Stock ticker
-            filing_accession: Filing accession number
+            cik: Company CIK
+            accession_number: Filing accession number
             filing_type: Filing type (8-K, 10-K, etc.)
             item_number: Item number within filing
             content: Chunk text content
@@ -209,7 +211,8 @@ class SupabaseService:
         try:
             data = {
                 "ticker": ticker.upper(),
-                "filing_accession": filing_accession,
+                "cik": cik,
+                "accession_number": accession_number,
                 "filing_type": filing_type,
                 "item_number": item_number,
                 "content": content,
@@ -226,7 +229,8 @@ class SupabaseService:
     async def store_filing_chunks_batch(
         self,
         ticker: str,
-        filing_accession: str,
+        cik: str,
+        accession_number: str,
         filing_type: str,
         chunks: List[Dict[str, Any]],
     ) -> int:
@@ -235,7 +239,8 @@ class SupabaseService:
 
         Args:
             ticker: Stock ticker
-            filing_accession: Filing accession number
+            cik: Company CIK
+            accession_number: Filing accession number
             filing_type: Filing type
             chunks: List of chunk dicts with content, item_number, embedding
 
@@ -249,7 +254,8 @@ class SupabaseService:
             data = [
                 {
                     "ticker": ticker.upper(),
-                    "filing_accession": filing_accession,
+                    "cik": cik,
+                    "accession_number": accession_number,
                     "filing_type": filing_type,
                     "item_number": chunk.get("item_number", ""),
                     "content": chunk["content"],
@@ -260,7 +266,7 @@ class SupabaseService:
             ]
 
             self.client.table("filing_chunks").insert(data).execute()
-            logger.info(f"Stored {len(chunks)} chunks for {filing_accession}")
+            logger.info(f"Stored {len(chunks)} chunks for {accession_number}")
             return len(chunks)
         except Exception as e:
             logger.error(f"Error storing filing chunks batch: {e}")
@@ -304,14 +310,14 @@ class SupabaseService:
     async def get_filing_chunks(
         self,
         ticker: str,
-        filing_accession: Optional[str] = None,
+        accession_number: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get filing chunks for a ticker.
 
         Args:
             ticker: Stock ticker
-            filing_accession: Optional specific filing
+            accession_number: Optional specific filing
 
         Returns:
             List of chunks
@@ -322,8 +328,8 @@ class SupabaseService:
                 .select("*")
                 .eq("ticker", ticker.upper())
             )
-            if filing_accession:
-                query = query.eq("filing_accession", filing_accession)
+            if accession_number:
+                query = query.eq("accession_number", accession_number)
 
             result = query.order("created_at", desc=True).execute()
             return result.data or []
@@ -334,14 +340,14 @@ class SupabaseService:
     async def delete_filing_chunks(
         self,
         ticker: str,
-        filing_accession: Optional[str] = None,
+        accession_number: Optional[str] = None,
     ) -> int:
         """
         Delete filing chunks for a ticker.
 
         Args:
             ticker: Stock ticker
-            filing_accession: Optional specific filing
+            accession_number: Optional specific filing
 
         Returns:
             Number of deleted chunks
@@ -352,8 +358,8 @@ class SupabaseService:
                 .delete()
                 .eq("ticker", ticker.upper())
             )
-            if filing_accession:
-                query = query.eq("filing_accession", filing_accession)
+            if accession_number:
+                query = query.eq("accession_number", accession_number)
 
             result = query.execute()
             count = len(result.data) if result.data else 0
