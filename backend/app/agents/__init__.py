@@ -2,6 +2,8 @@
 from app.agents.fetcher import fetcher_agent, FilingFetcherAgent
 from app.agents.extractor import extractor_agent, SignalExtractorAgent
 from app.agents.validator import validator_agent, SignalValidatorAgent
+from app.agents.scorer import scorer_agent, RiskScorerAgent
+from app.agents.reporter import reporter_agent, ReportGeneratorAgent
 from app.agents.orchestrator import AnalysisPipeline
 
 __all__ = [
@@ -11,5 +13,9 @@ __all__ = [
     "SignalExtractorAgent",
     "validator_agent",
     "SignalValidatorAgent",
+    "scorer_agent",
+    "RiskScorerAgent",
+    "reporter_agent",
+    "ReportGeneratorAgent",
     "AnalysisPipeline",
 ]

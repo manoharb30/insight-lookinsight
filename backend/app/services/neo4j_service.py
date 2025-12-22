@@ -163,13 +163,13 @@ class Neo4jService:
         """
         query = """
         MERGE (c:Company {ticker: $ticker})
+        ON CREATE SET c.created_at = datetime()
         SET c.cik = $cik,
             c.name = $name,
             c.status = $status,
             c.risk_score = $risk_score,
             c.sector = $sector,
             c.updated_at = datetime()
-        ON CREATE SET c.created_at = datetime()
         RETURN c
         """
         try:
