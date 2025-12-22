@@ -32,7 +32,7 @@ class APIClient {
    * Start a new analysis for a ticker
    */
   async startAnalysis(ticker: string): Promise<AnalyzeResponse> {
-    return this.fetch<AnalyzeResponse>("/api/analyze", {
+    return this.fetch<AnalyzeResponse>("/api/v1/analyze", {
       method: "POST",
       body: JSON.stringify({ ticker: ticker.toUpperCase() }),
     });
@@ -42,7 +42,7 @@ class APIClient {
    * Get the status of an analysis job
    */
   async getJobStatus(jobId: string): Promise<JobStatus> {
-    return this.fetch<JobStatus>(`/api/analyze/${jobId}`);
+    return this.fetch<JobStatus>(`/api/v1/analyze/${jobId}`);
   }
 
   /**
@@ -50,7 +50,7 @@ class APIClient {
    */
   async getCachedAnalysis(ticker: string): Promise<AnalysisResult | null> {
     try {
-      return await this.fetch<AnalysisResult>(`/api/company/${ticker.toUpperCase()}`);
+      return await this.fetch<AnalysisResult>(`/api/v1/company/${ticker.toUpperCase()}`);
     } catch {
       return null;
     }
@@ -65,7 +65,7 @@ class APIClient {
     onComplete: (result: AnalysisResult) => void,
     onError: (error: string) => void
   ): () => void {
-    const eventSource = new EventSource(`${this.baseUrl}/api/stream/${jobId}`);
+    const eventSource = new EventSource(`${this.baseUrl}/api/v1/stream/${jobId}`);
 
     eventSource.addEventListener("update", (event) => {
       try {
@@ -108,7 +108,7 @@ class APIClient {
    * Get similar companies
    */
   async getSimilarCompanies(ticker: string): Promise<AnalysisResult["similar_companies"]> {
-    return this.fetch(`/api/similar/${ticker.toUpperCase()}`);
+    return this.fetch(`/api/v1/similar/${ticker.toUpperCase()}`);
   }
 
   /**
@@ -118,7 +118,7 @@ class APIClient {
     ticker1: string,
     ticker2: string
   ): Promise<{ company1: AnalysisResult; company2: AnalysisResult }> {
-    return this.fetch("/api/compare", {
+    return this.fetch("/api/v1/compare", {
       method: "POST",
       body: JSON.stringify({
         ticker1: ticker1.toUpperCase(),
