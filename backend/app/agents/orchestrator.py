@@ -5,7 +5,11 @@ from datetime import datetime
 
 from app.agents.fetcher import fetcher_agent
 from app.agents.extractor import extractor_agent
+from app.agents.validator import validator_agent
 from app.services.neo4j_service import neo4j_service
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class AnalysisPipeline:
@@ -13,11 +17,11 @@ class AnalysisPipeline:
     Orchestrates the multi-agent analysis pipeline.
 
     Pipeline stages:
-    1. Fetcher Agent - Get SEC filings
+    1. Fetcher Agent - Get SEC filings from EDGAR
     2. Extractor Agent - Extract signals with GPT-4o
-    3. (Future) Validator Agent - Validate signals
-    4. (Future) Scorer Agent - Calculate risk score
-    5. (Future) Reporter Agent - Generate report
+    3. Validator Agent - Validate signals, remove false positives
+    4. (Future) Scorer Agent - Calculate risk score with pattern matching
+    5. (Future) Reporter Agent - Generate detailed report
     """
 
     def __init__(self, job_id: str, jobs_store: Dict):
@@ -91,37 +95,52 @@ class AnalysisPipeline:
                 signals_found=extraction_result.total_signals,
             )
 
-            # Stage 3: Store in Neo4j (simplified validation for Phase 1)
+            # Stage 3: Validate signals with Validator Agent
             self._update_job("validating", "Validating signals...", 70)
 
-            await neo4j_service.store_company(
-                {
-                    "ticker": ticker,
-                    "cik": fetch_result.cik,
-                    "name": fetch_result.company_name,
-                    "status": "ACTIVE",
-                    "risk_score": 0,  # Will be calculated in Phase 3
-                }
+            validation_result = await validator_agent.run(
+                ticker=ticker,
+                company_name=fetch_result.company_name,
+                cik=fetch_result.cik,
+                signals=extraction_result.signals,
+                filings=fetch_result.filings,
+                store_in_neo4j=True,
+                use_gpt_validation=False,  # Set True for extra validation
+                update_callback=self._update_callback,
             )
 
-            for signal in extraction_result.signals:
-                await neo4j_service.store_signal(
-                    ticker=ticker,
-                    filing_accession=signal["filing_accession"],
-                    signal_data=signal,
-                )
+            if validation_result.error:
+                logger.warning(f"Validation error (continuing): {validation_result.error}")
+
+            logger.info(
+                f"Validation complete: {validation_result.total_validated}/{validation_result.total_input} "
+                f"signals passed ({validation_result.validation_rate:.0%})"
+            )
 
             self._update_job(
                 "validating",
-                f"Stored {len(extraction_result.signals)} signals",
+                f"Validated {validation_result.total_validated} signals "
+                f"(rejected {validation_result.total_rejected})",
                 80,
-                signals_found=len(extraction_result.signals),
+                signals_found=validation_result.total_validated,
             )
 
-            # Stage 4: Calculate risk score (simplified for Phase 1)
+            # Use validated signals for rest of pipeline
+            validated_signals = validation_result.validated_signals
+
+            # Stage 4: Calculate risk score
             self._update_job("scoring", "Calculating risk score...", 85)
 
-            risk_score = self._calculate_basic_risk_score(extraction_result.signals)
+            risk_score = self._calculate_basic_risk_score(validated_signals)
+
+            # Update company risk score in Neo4j
+            await neo4j_service.store_company({
+                "ticker": ticker,
+                "cik": fetch_result.cik,
+                "name": fetch_result.company_name,
+                "status": "ACTIVE",
+                "risk_score": risk_score,
+            })
 
             # Stage 5: Generate result
             self._update_job("reporting", "Generating report...", 95)
@@ -130,9 +149,11 @@ class AnalysisPipeline:
                 ticker=ticker,
                 cik=fetch_result.cik,
                 company_name=fetch_result.company_name,
-                signals=extraction_result.signals,
+                signals=validated_signals,
+                rejected_signals=validation_result.rejected_signals,
                 risk_score=risk_score,
                 filings_analyzed=fetch_result.total_filings,
+                validation_rate=validation_result.validation_rate,
             )
 
             return result
@@ -186,8 +207,10 @@ class AnalysisPipeline:
         cik: str,
         company_name: str,
         signals: List[Dict[str, Any]],
+        rejected_signals: List[Dict[str, Any]],
         risk_score: int,
         filings_analyzed: int,
+        validation_rate: float,
     ) -> Dict[str, Any]:
         """Build the final result object."""
         # Group signals by type
@@ -213,11 +236,18 @@ class AnalysisPipeline:
                     "date": signal.get("date", ""),
                     "type": signal.get("type", ""),
                     "severity": signal.get("severity", 5),
+                    "confidence": signal.get("confidence", 0.8),
                     "evidence": signal.get("evidence", "")[:200] + "..."
                     if len(signal.get("evidence", "")) > 200
                     else signal.get("evidence", ""),
+                    "validated": signal.get("validated", True),
                 }
             )
+
+        # Generate executive summary based on signals
+        summary = self._generate_executive_summary(
+            company_name, ticker, signals, risk_score
+        )
 
         return {
             "ticker": ticker,
@@ -232,8 +262,59 @@ class AnalysisPipeline:
             "timeline": timeline[:20],  # Limit timeline to 20 items
             "filings_analyzed": filings_analyzed,
             "analyzed_at": datetime.utcnow().isoformat(),
+            "validation": {
+                "total_extracted": len(signals) + len(rejected_signals),
+                "total_validated": len(signals),
+                "total_rejected": len(rejected_signals),
+                "validation_rate": validation_rate,
+            },
             "similar_companies": [],  # Phase 3
             "bankruptcy_pattern_match": None,  # Phase 3
-            "executive_summary": f"Analysis of {company_name} ({ticker}) identified {len(signals)} distress signals with a risk score of {risk_score}/100.",
+            "executive_summary": summary,
             "key_risks": list(signal_summary.keys())[:5],
         }
+
+    def _generate_executive_summary(
+        self,
+        company_name: str,
+        ticker: str,
+        signals: List[Dict[str, Any]],
+        risk_score: int,
+    ) -> str:
+        """Generate an executive summary of the analysis."""
+        risk_level = self._get_risk_level(risk_score)
+
+        if not signals:
+            return (
+                f"Analysis of {company_name} ({ticker}) found no significant distress "
+                f"signals in recent SEC filings. Risk score: {risk_score}/100 ({risk_level})."
+            )
+
+        # Count signal types
+        signal_types = {}
+        for s in signals:
+            t = s.get("type", "")
+            signal_types[t] = signal_types.get(t, 0) + 1
+
+        # Build summary
+        top_signals = sorted(signal_types.items(), key=lambda x: x[1], reverse=True)[:3]
+        signal_text = ", ".join(
+            f"{count} {stype.replace('_', ' ').title()}"
+            for stype, count in top_signals
+        )
+
+        severity_desc = ""
+        if risk_level == "CRITICAL":
+            severity_desc = "Multiple critical distress indicators detected. "
+        elif risk_level == "HIGH":
+            severity_desc = "Significant warning signs present. "
+        elif risk_level == "MEDIUM":
+            severity_desc = "Some concerns identified. "
+        else:
+            severity_desc = "Limited concerns. "
+
+        return (
+            f"Analysis of {company_name} ({ticker}) identified {len(signals)} validated "
+            f"distress signals including {signal_text}. {severity_desc}"
+            f"Risk score: {risk_score}/100 ({risk_level})."
+        )
