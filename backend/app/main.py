@@ -14,12 +14,19 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     # Startup
     print("Starting up Insight Lookinsight API...")
-    await neo4j_service.connect()
-    print("Connected to Neo4j")
+    try:
+        await neo4j_service.connect()
+        print("Connected to Neo4j")
+    except Exception as e:
+        print(f"Warning: Could not connect to Neo4j: {e}")
+        print("App will continue without Neo4j graph features")
     yield
     # Shutdown
     print("Shutting down...")
-    await neo4j_service.close()
+    try:
+        await neo4j_service.close()
+    except Exception:
+        pass
 
 
 app = FastAPI(
