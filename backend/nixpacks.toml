@@ -1,8 +1,5 @@
-[phases.setup]
-nixPkgs = ["python312", "python312Packages.pip"]
-
-[phases.install]
-cmds = ["python -m pip install -r requirements.txt"]
+# Let nixpacks auto-detect Python from requirements.txt
+# Only override the start command
 
 [start]
-cmd = "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+cmd = "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
