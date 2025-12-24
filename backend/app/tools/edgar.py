@@ -213,7 +213,7 @@ class SECEdgarClient:
             List of Filing objects
         """
         if filing_types is None:
-            filing_types = ["8-K", "10-K", "10-Q"]
+            filing_types = ["8-K", "10-K"]  # Include 10-K for going concern detection
 
         cik = cik.zfill(10)
 
@@ -281,13 +281,13 @@ class SECEdgarClient:
 
     def download_filing(self, filing: Filing) -> Dict[str, Any]:
         """
-        Download and parse a filing's content.
+        Download filing content - no regex parsing.
 
         Args:
             filing: Filing object
 
         Returns:
-            Dict with filing content and parsed sections
+            Dict with filing content (LLM handles parsing)
         """
         try:
             logger.debug(f"Downloading filing {filing.accession_number}")
@@ -298,19 +298,14 @@ class SECEdgarClient:
             for tag in soup(["script", "style"]):
                 tag.decompose()
 
-            # Extract text content
+            # Extract text
             text = soup.get_text(separator="\n", strip=True)
 
-            # Limit text size to prevent memory issues
-            max_chars = 500000  # ~125k tokens
+            # Limit size - 100k chars for full filing
+            max_chars = 100000
             if len(text) > max_chars:
                 logger.warning(f"Filing {filing.accession_number} truncated from {len(text)} to {max_chars} chars")
                 text = text[:max_chars]
-
-            # Parse into sections for 8-K
-            sections = {}
-            if filing.filing_type == "8-K":
-                sections = self._parse_8k_sections(text)
 
             return {
                 "accession_number": filing.accession_number,
@@ -319,73 +314,20 @@ class SECEdgarClient:
                 "items": filing.items,
                 "url": filing.url,
                 "raw_text": text,
-                "sections": sections,
                 "char_count": len(text),
+                # NO sections dict - LLM handles parsing
             }
 
         except (SECEdgarError, RateLimitError):
             raise
         except Exception as e:
-            logger.error(f"Error downloading filing {filing.accession_number}: {e}")
+            logger.error(f"Error downloading {filing.accession_number}: {e}")
             return {
                 "accession_number": filing.accession_number,
                 "filing_type": filing.filing_type,
                 "filed_at": filing.filed_at,
                 "error": str(e),
             }
-
-    def _parse_8k_sections(self, text: str) -> Dict[str, str]:
-        """
-        Parse 8-K text into item sections.
-
-        Args:
-            text: Raw filing text
-
-        Returns:
-            Dict mapping item numbers to section content
-        """
-        sections = {}
-
-        # Common 8-K item patterns
-        item_patterns = [
-            r"Item\s*(\d+\.\d+)",
-            r"ITEM\s*(\d+\.\d+)",
-        ]
-
-        # Find all item markers
-        markers = []
-        for pattern in item_patterns:
-            for match in re.finditer(pattern, text):
-                markers.append((match.start(), match.group(1)))
-
-        # Deduplicate markers at same position
-        seen_positions = set()
-        unique_markers = []
-        for pos, item in markers:
-            if pos not in seen_positions:
-                seen_positions.add(pos)
-                unique_markers.append((pos, item))
-
-        # Sort by position
-        unique_markers.sort(key=lambda x: x[0])
-
-        # Extract text between markers
-        for i, (pos, item) in enumerate(unique_markers):
-            if i < len(unique_markers) - 1:
-                next_pos = unique_markers[i + 1][0]
-                content = text[pos:next_pos]
-            else:
-                # Last item - take until end or signature
-                content = text[pos:]
-                sig_match = re.search(r"SIGNATURE", content, re.IGNORECASE)
-                if sig_match:
-                    content = content[: sig_match.start()]
-
-            # Only keep sections with meaningful content
-            if len(content.strip()) > 100:
-                sections[item] = content.strip()
-
-        return sections
 
 
 # Singleton instance

@@ -28,14 +28,8 @@ export default function Home() {
             <Link href="/methodology" className="text-gray-600 hover:text-gray-900">
               Methodology
             </Link>
-            <Link href="/pricing" className="text-gray-600 hover:text-gray-900">
-              Pricing
-            </Link>
-            <Link
-              href="/pricing"
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              Get Started
+            <Link href="/compare" className="text-gray-600 hover:text-gray-900">
+              Compare
             </Link>
           </div>
         </div>
@@ -183,7 +177,6 @@ export default function Home() {
               <h4 className="text-white font-semibold mb-4">Product</h4>
               <ul className="space-y-2 text-sm">
                 <li><Link href="/methodology" className="hover:text-white">Methodology</Link></li>
-                <li><Link href="/pricing" className="hover:text-white">Pricing</Link></li>
                 <li><Link href="/compare" className="hover:text-white">Compare</Link></li>
               </ul>
             </div>

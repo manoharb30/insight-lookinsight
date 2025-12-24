@@ -307,6 +307,119 @@ class SupabaseService:
             logger.error(f"Error searching similar chunks: {e}")
             return []
 
+    async def semantic_search_in_filing(
+        self,
+        query_embedding: List[float],
+        filing_accession: str,
+        top_k: int = 3,
+        similarity_threshold: float = 0.5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for similar chunks within a specific filing.
+
+        Args:
+            query_embedding: Embedding vector of the marker phrase
+            filing_accession: Accession number to search within
+            top_k: Number of results to return
+            similarity_threshold: Minimum similarity score
+
+        Returns:
+            List of matching chunks with similarity scores
+        """
+        try:
+            # Use pgvector similarity search filtered by accession number
+            result = self.client.rpc(
+                'match_filing_chunks_by_accession',
+                {
+                    'query_embedding': query_embedding,
+                    'match_accession': filing_accession,
+                    'match_threshold': similarity_threshold,
+                    'match_count': top_k,
+                }
+            ).execute()
+
+            return result.data or []
+
+        except Exception as e:
+            logger.error(f"Semantic search in filing error: {e}")
+            return []
+
+    async def store_filing_chunks(
+        self,
+        filing_accession: str,
+        chunks: List[Dict[str, Any]],
+        ticker: str = "",
+        cik: str = "",
+        filing_type: str = "8-K",
+    ) -> bool:
+        """
+        Store filing chunks with embeddings (simplified interface).
+
+        Args:
+            filing_accession: Filing accession number
+            chunks: List of {content, embedding, char_start, char_end} dicts
+            ticker: Stock ticker
+            cik: Company CIK
+            filing_type: Filing type
+
+        Returns:
+            Success boolean
+        """
+        if not chunks:
+            return True
+
+        try:
+            records = [
+                {
+                    'accession_number': filing_accession,
+                    'ticker': ticker.upper() if ticker else "",
+                    'cik': cik,
+                    'filing_type': filing_type,
+                    'item_number': chunk.get('item_number', ''),
+                    'content': chunk['content'],
+                    'embedding': chunk['embedding'],
+                    'chunk_index': chunk.get('position', i),
+                    'char_start': chunk.get('char_start', 0),
+                    'char_end': chunk.get('char_end', 0),
+                }
+                for i, chunk in enumerate(chunks)
+            ]
+
+            self.client.table('filing_chunks').upsert(
+                records,
+                on_conflict='accession_number,chunk_index'
+            ).execute()
+
+            logger.info(f"Stored {len(records)} chunks for {filing_accession}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error storing filing chunks: {e}")
+            return False
+
+    async def chunks_exist_for_filing(self, accession_number: str) -> bool:
+        """
+        Check if chunks already exist for a filing (to avoid duplicate embedding generation).
+
+        Args:
+            accession_number: Filing accession number
+
+        Returns:
+            True if chunks exist, False otherwise
+        """
+        try:
+            result = (
+                self.client.table("filing_chunks")
+                .select("id")
+                .eq("accession_number", accession_number)
+                .limit(1)
+                .execute()
+            )
+            return len(result.data) > 0
+        except Exception as e:
+            logger.warning(f"Error checking chunks existence: {e}")
+            return False  # Assume doesn't exist on error
+
     async def get_filing_chunks(
         self,
         ticker: str,

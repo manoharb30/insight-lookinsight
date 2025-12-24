@@ -1,22 +1,24 @@
-"""Agent 2: Signal Extractor - GPT-4o signal extraction with chunking."""
+"""Agent 2: Signal Extractor - LLM-based full filing extraction with verified evidence."""
 
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import uuid
 
-from app.tools.chunker import chunker, Chunk
-from app.tools.embeddings import embeddings_client
 from app.tools.extraction import signal_extractor, ExtractedSignal
-from app.services.supabase_service import supabase_service
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
 class ExtractionResult:
     ticker: str
     signals: List[Dict[str, Any]]
-    total_chunks: int
+    total_filings: int
+    eight_k_count: int
+    ten_k_count: int
     total_signals: int
-    chunks_processed: int
+    verified_signals: int  # Count of signals with verified evidence
     error: Optional[str] = None
 
 
@@ -24,14 +26,14 @@ class SignalExtractorAgent:
     """
     Agent 2: Financial Distress Signal Analyst
 
-    Role: Extract bankruptcy warning signals from SEC filings
-    Goal: Extract signals with exact evidence using GPT-4o
+    Uses LLM on full filing text + embeddings for verbatim evidence verification.
+    - 8-K: Full text extraction (all signal types)
+    - 10-K: Going concern only (keyword search + LLM)
     """
 
     def __init__(self):
         self.role = "Financial Distress Signal Analyst"
-        self.goal = "Extract bankruptcy warning signals from SEC filings with exact evidence"
-        self.backstory = "Senior financial analyst specializing in corporate distress indicators"
+        self.goal = "Extract bankruptcy warning signals with verified evidence"
 
     async def run(
         self,
@@ -39,108 +41,65 @@ class SignalExtractorAgent:
         cik: str,
         company_name: str,
         filings: List[Dict[str, Any]],
-        store_embeddings: bool = True,
         update_callback=None,
     ) -> ExtractionResult:
-        """
-        Extract signals from filings.
+        """Extract signals from filings using LLM + embedding verification."""
 
-        Args:
-            ticker: Stock ticker
-            cik: Company CIK
-            company_name: Company name
-            filings: List of filing data from fetcher
-            store_embeddings: Whether to store chunk embeddings in Supabase
-            update_callback: Optional callback for progress updates
-        """
-        all_signals = []
-        total_chunks = 0
-        chunks_processed = 0
-
-        for filing_idx, filing in enumerate(filings):
-            if update_callback:
-                await update_callback(
-                    f"Processing filing {filing_idx + 1}/{len(filings)}..."
-                )
-
-            # Skip filings with errors
-            if "error" in filing:
-                continue
-
-            # Chunk the filing
-            chunks = chunker.chunk_for_extraction(filing)
-            total_chunks += len(chunks)
-
-            # Prepare chunks for embedding (batch)
-            chunk_texts = [c.content for c in chunks]
-
-            # Generate embeddings
-            if store_embeddings and chunk_texts:
-                try:
-                    embeddings = embeddings_client.embed_texts(chunk_texts)
-
-                    # Store in Supabase
-                    chunk_data = [
-                        {
-                            "content": chunks[i].content,
-                            "item_number": chunks[i].item_number,
-                            "embedding": embeddings[i],
-                        }
-                        for i in range(len(chunks))
-                    ]
-
-                    await supabase_service.store_filing_chunks_batch(
-                        ticker=ticker,
-                        cik=cik,
-                        accession_number=filing["accession_number"],
-                        filing_type=filing["filing_type"],
-                        chunks=chunk_data,
-                    )
-                except Exception as e:
-                    print(f"Error storing embeddings: {e}")
-
-            # Extract signals from each chunk
-            for chunk in chunks:
-                signals = signal_extractor.extract_signals(
-                    text=chunk.content,
-                    item_number=chunk.item_number,
-                    filing_date=filing.get("filed_at", ""),
-                    company_name=company_name,
-                )
-
-                for signal in signals:
-                    signal_dict = {
-                        "signal_id": str(uuid.uuid4()),
-                        "type": signal.signal_type,
-                        "severity": signal.severity,
-                        "confidence": signal.confidence,
-                        "evidence": signal.evidence,
-                        "date": signal.date,
-                        "person": signal.person,
-                        "item_number": signal.item_number,
-                        "filing_accession": filing["accession_number"],
-                        "filing_type": filing["filing_type"],
-                    }
-                    all_signals.append(signal_dict)
-
-                chunks_processed += 1
-
-            if update_callback:
-                await update_callback(
-                    f"Extracted {len(all_signals)} signals so far..."
-                )
+        # Count filing types
+        eight_k_filings = [f for f in filings if f.get("filing_type") == "8-K"]
+        ten_k_filings = [f for f in filings if f.get("filing_type") == "10-K"]
 
         if update_callback:
             await update_callback(
-                f"Extraction complete: {len(all_signals)} signals from {chunks_processed} chunks"
+                f"Processing {len(eight_k_filings)} 8-K and {len(ten_k_filings)} 10-K filings..."
+            )
+
+        # Extract signals in parallel with ticker/cik for embedding storage
+        extracted_signals = await signal_extractor.extract_from_filings(
+            filings=filings,
+            company_name=company_name,
+            ticker=ticker,
+            cik=cik,
+            update_callback=update_callback,
+        )
+
+        # Convert to dict format for pipeline
+        signals = []
+        verified_count = 0
+
+        for sig in extracted_signals:
+            if sig.evidence_verified:
+                verified_count += 1
+
+            signals.append({
+                "signal_id": str(uuid.uuid4()),
+                "type": sig.signal_type,
+                "severity": sig.severity,
+                "confidence": sig.confidence,
+                "evidence": sig.evidence,
+                "marker_phrase": sig.marker_phrase,
+                "evidence_verified": sig.evidence_verified,
+                "date": sig.event_date or sig.filing_date,
+                "person": sig.person,
+                "item_number": sig.item_number,
+                "filing_accession": sig.filing_accession,
+                "filing_type": sig.filing_type,
+            })
+
+        if update_callback:
+            await update_callback(
+                f"Extraction complete: {len(signals)} signals "
+                f"({verified_count} with verified evidence)"
             )
 
         return ExtractionResult(
             ticker=ticker,
-            signals=all_signals,
-            total_chunks=total_chunks,
-            total_signals=len(all_signals),
-            chunks_processed=chunks_processed,
+            signals=signals,
+            total_filings=len(filings),
+            eight_k_count=len(eight_k_filings),
+            ten_k_count=len(ten_k_filings),
+            total_signals=len(signals),
+            verified_signals=verified_count,
         )
 
 

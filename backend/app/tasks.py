@@ -8,6 +8,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.celery_app import celery_app
 from app.agents.orchestrator import AnalysisPipeline
 from app.services.supabase_service import supabase_service
+from app.services.neo4j_service import neo4j_service
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -43,27 +44,59 @@ def update_job_status(job_id: str, updates: Dict[str, Any]):
     set_job_status(job_id, current)
 
 
+# ==================== Running Jobs Tracking ====================
+# Track which job is currently running for each ticker to prevent duplicates
+
+def get_running_job_for_ticker(ticker: str) -> str | None:
+    """Get the job ID of any currently running job for this ticker."""
+    job_id = redis_client.get(f"running:{ticker.upper()}")
+    if job_id:
+        # Verify the job is still actually running
+        status = get_job_status(job_id)
+        if status.get("status") in ["pending", "processing"]:
+            return job_id
+        # Job finished/failed/cancelled, clean up stale reference
+        clear_running_job_for_ticker(ticker)
+    return None
+
+
+def set_running_job_for_ticker(ticker: str, job_id: str, expire: int = 1800):
+    """Mark a job as the running job for this ticker (30 min expiry as safety)."""
+    redis_client.setex(f"running:{ticker.upper()}", expire, job_id)
+
+
+def clear_running_job_for_ticker(ticker: str):
+    """Clear the running job tracking for a ticker."""
+    redis_client.delete(f"running:{ticker.upper()}")
+
+
 class AnalysisTask(Task):
     """Custom Celery task with cleanup on revocation."""
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         """Handle task failure."""
         job_id = kwargs.get("job_id") or args[0] if args else None
+        ticker = kwargs.get("ticker") or (args[1] if len(args) > 1 else None)
         if job_id:
             update_job_status(job_id, {
                 "status": "failed",
                 "message": str(exc),
             })
+        if ticker:
+            clear_running_job_for_ticker(ticker)
         logger.error(f"Task {task_id} failed: {exc}")
 
     def on_revoke(self, task_id, args, kwargs, request=None):
         """Handle task revocation (cancellation)."""
         job_id = kwargs.get("job_id") or args[0] if args else None
+        ticker = kwargs.get("ticker") or (args[1] if len(args) > 1 else None)
         if job_id:
             update_job_status(job_id, {
                 "status": "cancelled",
                 "message": "Analysis was cancelled",
             })
+        if ticker:
+            clear_running_job_for_ticker(ticker)
         logger.info(f"Task {task_id} was revoked/cancelled")
 
 
@@ -89,9 +122,21 @@ def run_analysis_task(self, job_id: str, ticker: str) -> Dict[str, Any]:
         })
 
         # Create a wrapper that updates Redis instead of in-memory dict
+        class JobStatusWrapper(dict):
+            """Dict wrapper that syncs updates to Redis."""
+            def __init__(self, job_id, data):
+                super().__init__(data)
+                self._job_id = job_id
+
+            def update(self, other):
+                super().update(other)
+                # Sync to Redis
+                set_job_status(self._job_id, dict(self))
+
         class RedisJobStore:
             def __getitem__(self, key):
-                return get_job_status(key)
+                data = get_job_status(key)
+                return JobStatusWrapper(key, data)
 
             def __setitem__(self, key, value):
                 set_job_status(key, value)
@@ -100,8 +145,9 @@ def run_analysis_task(self, job_id: str, ticker: str) -> Dict[str, Any]:
                 return redis_client.exists(f"job:{key}")
 
             def get(self, key, default=None):
-                result = get_job_status(key)
-                return result if result else default
+                if redis_client.exists(f"job:{key}"):
+                    return JobStatusWrapper(key, get_job_status(key))
+                return default
 
             def update_job(self, key, updates):
                 update_job_status(key, updates)
@@ -113,6 +159,14 @@ def run_analysis_task(self, job_id: str, ticker: str) -> Dict[str, Any]:
         asyncio.set_event_loop(loop)
 
         try:
+            # Connect to Neo4j if not already connected (Celery workers are separate processes)
+            if not neo4j_service._initialized:
+                try:
+                    loop.run_until_complete(neo4j_service.connect())
+                    logger.info("Connected to Neo4j in Celery worker")
+                except Exception as e:
+                    logger.warning(f"Could not connect to Neo4j: {e} - continuing without graph features")
+
             pipeline = AnalysisPipeline(job_id, jobs_store)
             result = loop.run_until_complete(pipeline.run(ticker))
 
@@ -123,6 +177,9 @@ def run_analysis_task(self, job_id: str, ticker: str) -> Dict[str, Any]:
                 "progress": 100,
                 "result": result,
             })
+
+            # Clear running job tracking
+            clear_running_job_for_ticker(ticker)
 
             # Cache result in Supabase
             loop.run_until_complete(
@@ -139,7 +196,7 @@ def run_analysis_task(self, job_id: str, ticker: str) -> Dict[str, Any]:
         except SoftTimeLimitExceeded:
             update_job_status(job_id, {
                 "status": "failed",
-                "message": "Analysis timed out after 9 minutes",
+                "message": "Analysis timed out after 29 minutes",
             })
             raise
 
@@ -152,6 +209,7 @@ def run_analysis_task(self, job_id: str, ticker: str) -> Dict[str, Any]:
             "status": "failed",
             "message": str(e),
         })
+        clear_running_job_for_ticker(ticker)
         raise
 
 
@@ -163,6 +221,7 @@ def cancel_analysis_task(job_id: str) -> bool:
     """
     job_status = get_job_status(job_id)
     task_id = job_status.get("task_id")
+    ticker = job_status.get("ticker")
 
     if not task_id:
         logger.warning(f"No task_id found for job {job_id}")
@@ -176,6 +235,10 @@ def cancel_analysis_task(job_id: str) -> bool:
         "status": "cancelled",
         "message": "Analysis was cancelled by user",
     })
+
+    # Clear running job tracking
+    if ticker:
+        clear_running_job_for_ticker(ticker)
 
     logger.info(f"Cancelled task {task_id} for job {job_id}")
     return True

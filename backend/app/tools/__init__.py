@@ -1,19 +1,19 @@
 # Tools module
 from app.tools.edgar import edgar_client, SECEdgarClient
-from app.tools.chunker import chunker, FilingChunker
-from app.tools.embeddings import embeddings_client, EmbeddingsClient
+from app.tools.embeddings import embedding_service, EmbeddingService, embeddings_client
 from app.tools.extraction import signal_extractor, SignalExtractor
 from app.tools.validation import signal_validator, SignalValidator
+from app.tools.deduplication import deduplicate_signals
 
 __all__ = [
     "edgar_client",
     "SECEdgarClient",
-    "chunker",
-    "FilingChunker",
-    "embeddings_client",
-    "EmbeddingsClient",
+    "embedding_service",
+    "EmbeddingService",
+    "embeddings_client",  # Backward compatible alias
     "signal_extractor",
     "SignalExtractor",
     "signal_validator",
     "SignalValidator",
+    "deduplicate_signals",
 ]

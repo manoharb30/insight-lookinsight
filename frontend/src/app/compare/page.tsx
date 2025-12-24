@@ -32,8 +32,8 @@ export default function ComparePage() {
             <Link href="/methodology" className="text-gray-600 hover:text-gray-900">
               Methodology
             </Link>
-            <Link href="/pricing" className="text-gray-600 hover:text-gray-900">
-              Pricing
+            <Link href="/" className="text-gray-600 hover:text-gray-900">
+              Analyze
             </Link>
           </div>
         </div>

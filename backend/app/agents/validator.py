@@ -1,9 +1,11 @@
-"""Agent 3: Signal Validator - Validates extracted signals and removes false positives."""
+"""Agent 3: Signal Validator - Validates and deduplicates signals."""
 
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
-from app.tools.validation import signal_validator, ValidationResult
+from app.tools.validation import signal_validator
+from app.tools.deduplication import deduplicate_signals
+from app.tools.evidence_filter import filter_signals_by_evidence_quality
 from app.services.neo4j_service import neo4j_service
 from app.core.logging import get_logger
 
@@ -12,7 +14,6 @@ logger = get_logger(__name__)
 
 @dataclass
 class ValidationOutput:
-    """Output from the validator agent."""
     ticker: str
     validated_signals: List[Dict[str, Any]]
     rejected_signals: List[Dict[str, Any]]
@@ -20,6 +21,7 @@ class ValidationOutput:
     total_validated: int
     total_rejected: int
     validation_rate: float
+    signals_by_type: Dict[str, int]
     error: Optional[str] = None
 
 
@@ -27,15 +29,15 @@ class SignalValidatorAgent:
     """
     Agent 3: Signal Quality Assurance Specialist
 
-    Role: Validate extracted signals and eliminate false positives
-    Goal: Ensure only high-quality, verified signals are stored
-    Backstory: Forensic accountant with expertise in separating real signals from noise
+    Simplified pipeline:
+    1. Evidence quality filter (remove junk)
+    2. Deduplication (type + date based)
+    3. Rule validation
     """
 
     def __init__(self):
         self.role = "Signal Quality Assurance Specialist"
-        self.goal = "Validate signals and eliminate false positives and hallucinations"
-        self.backstory = "Forensic accountant with expertise in separating real signals from noise"
+        self.goal = "Validate signals and eliminate duplicates"
 
     async def run(
         self,
@@ -48,45 +50,45 @@ class SignalValidatorAgent:
         use_gpt_validation: bool = False,
         update_callback=None,
     ) -> ValidationOutput:
-        """
-        Validate extracted signals.
+        """Validate and deduplicate signals."""
 
-        Args:
-            ticker: Stock ticker
-            company_name: Company name
-            cik: Company CIK
-            signals: List of raw signals from extractor
-            filings: Optional list of filing data (for evidence verification)
-            store_in_neo4j: Whether to store validated signals in Neo4j
-            use_gpt_validation: Whether to use GPT for edge case validation
-            update_callback: Optional callback for progress updates
-
-        Returns:
-            ValidationOutput with validated and rejected signals
-        """
         if update_callback:
-            await update_callback(f"Validating {len(signals)} signals...")
+            await update_callback(f"Validating {len(signals)} raw signals...")
 
-        # Build source text mapping for evidence verification
-        source_texts = {}
-        if filings:
-            for filing in filings:
-                if "raw_text" in filing and "accession_number" in filing:
-                    source_texts[filing["accession_number"]] = filing["raw_text"]
+        original_count = len(signals)
+        all_rejected = []
 
-        # Run validation
-        validated_signals, rejected_signals = signal_validator.validate_signals(
+        # STEP 1: Evidence quality filter
+        if update_callback:
+            await update_callback("Filtering by evidence quality...")
+
+        signals, rejected_quality = filter_signals_by_evidence_quality(signals)
+        all_rejected.extend(rejected_quality)
+
+        logger.info(f"After quality filter: {len(signals)} signals (rejected {len(rejected_quality)})")
+
+        # STEP 2: Deduplication (type + date based)
+        if update_callback:
+            await update_callback("Removing duplicates...")
+
+        dedup_result = deduplicate_signals(signals)
+        signals = dedup_result.unique_signals
+
+        logger.info(f"After deduplication: {len(signals)} signals (removed {dedup_result.duplicates_removed})")
+
+        # STEP 3: LLM validation
+        if update_callback:
+            await update_callback("Validating signals with LLM...")
+
+        validated_signals, rejected_rules = await signal_validator.validate_signals_async(
             signals=signals,
-            source_texts=source_texts if source_texts else None,
-            use_gpt=use_gpt_validation,
+            use_llm=True,  # Always use LLM validation
         )
+        all_rejected.extend(rejected_rules)
 
-        if update_callback:
-            await update_callback(
-                f"Validated {len(validated_signals)} signals, rejected {len(rejected_signals)}"
-            )
+        logger.info(f"After LLM validation: {len(validated_signals)} signals (rejected {len(rejected_rules)})")
 
-        # Store validated signals in Neo4j
+        # Store in Neo4j
         if store_in_neo4j and validated_signals:
             await self._store_signals_in_neo4j(
                 ticker=ticker,
@@ -96,31 +98,30 @@ class SignalValidatorAgent:
                 update_callback=update_callback,
             )
 
-        # Calculate validation rate
-        total = len(signals)
-        validation_rate = len(validated_signals) / total if total > 0 else 0.0
+        # Calculate final stats
+        validation_rate = len(validated_signals) / original_count if original_count > 0 else 0.0
 
-        # Log rejected signals for debugging
-        if rejected_signals:
-            logger.info(f"Rejected {len(rejected_signals)} signals for {ticker}:")
-            for sig in rejected_signals[:5]:  # Log first 5
-                logger.debug(
-                    f"  - {sig.get('type')}: {sig.get('rejection_reason')}"
-                )
+        # Count by type
+        signals_by_type = {}
+        for sig in validated_signals:
+            sig_type = sig.get("type", "UNKNOWN")
+            signals_by_type[sig_type] = signals_by_type.get(sig_type, 0) + 1
 
         if update_callback:
             await update_callback(
-                f"Validation complete: {len(validated_signals)}/{total} signals passed ({validation_rate:.0%})"
+                f"Validation complete: {len(validated_signals)} signals "
+                f"({validation_rate:.0%} pass rate)"
             )
 
         return ValidationOutput(
             ticker=ticker,
             validated_signals=validated_signals,
-            rejected_signals=rejected_signals,
-            total_input=total,
+            rejected_signals=all_rejected,
+            total_input=original_count,
             total_validated=len(validated_signals),
-            total_rejected=len(rejected_signals),
+            total_rejected=len(all_rejected),
             validation_rate=validation_rate,
+            signals_by_type=signals_by_type,
         )
 
     async def _store_signals_in_neo4j(
@@ -131,28 +132,25 @@ class SignalValidatorAgent:
         signals: List[Dict[str, Any]],
         update_callback=None,
     ) -> None:
-        """Store validated signals in Neo4j graph database."""
+        """Store validated signals in Neo4j."""
         try:
             if update_callback:
                 await update_callback("Storing signals in Neo4j...")
 
-            # Store company node first
             await neo4j_service.store_company({
                 "ticker": ticker,
                 "cik": cik,
                 "name": company_name,
                 "status": "ACTIVE",
-                "risk_score": 0,  # Will be updated by scorer agent
+                "risk_score": 0,
             })
 
-            # Store each filing and its signals
             filings_stored = set()
             for signal in signals:
                 filing_accession = signal.get("filing_accession", "")
                 filing_type = signal.get("filing_type", "")
                 date = signal.get("date", "")
 
-                # Store filing if not already stored
                 if filing_accession and filing_accession not in filings_stored:
                     await neo4j_service.store_filing(
                         ticker=ticker,
@@ -165,7 +163,6 @@ class SignalValidatorAgent:
                     )
                     filings_stored.add(filing_accession)
 
-                # Store the signal
                 if filing_accession:
                     await neo4j_service.store_signal(
                         ticker=ticker,
@@ -182,34 +179,10 @@ class SignalValidatorAgent:
                         },
                     )
 
-            logger.info(
-                f"Stored {len(signals)} signals in Neo4j for {ticker} "
-                f"({len(filings_stored)} filings)"
-            )
-
-            if update_callback:
-                await update_callback(f"Stored {len(signals)} signals in Neo4j")
+            logger.info(f"Stored {len(signals)} signals in Neo4j")
 
         except Exception as e:
             logger.error(f"Error storing signals in Neo4j: {e}")
-            # Don't raise - validation still succeeded even if storage failed
-
-    async def validate_single(
-        self,
-        signal: Dict[str, Any],
-        source_text: Optional[str] = None,
-    ) -> ValidationResult:
-        """
-        Validate a single signal.
-
-        Args:
-            signal: Signal dict
-            source_text: Optional source text for evidence verification
-
-        Returns:
-            ValidationResult
-        """
-        return signal_validator.validate_signal(signal, source_text)
 
 
 # Singleton instance

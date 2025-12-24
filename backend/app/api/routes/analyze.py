@@ -13,6 +13,8 @@ from app.tasks import (
     cancel_analysis_task,
     get_job_status,
     set_job_status,
+    get_running_job_for_ticker,
+    set_running_job_for_ticker,
 )
 from app.services.supabase_service import supabase_service
 from app.core.logging import get_logger
@@ -45,13 +47,23 @@ async def start_analysis(request: AnalyzeRequest):
     if not ticker or len(ticker) > 10:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
-    # Check cache first
+    # Check cache first (completed analysis in Supabase)
     cached = await supabase_service.get_cached_analysis(ticker)
     if cached and cached.get("status") == "completed":
         return AnalyzeResponse(
             job_id=cached["id"],
             status="completed",
             cached=True,
+        )
+
+    # Check if there's already a running job for this ticker
+    existing_job_id = get_running_job_for_ticker(ticker)
+    if existing_job_id:
+        logger.info(f"Returning existing job {existing_job_id} for {ticker}")
+        return AnalyzeResponse(
+            job_id=existing_job_id,
+            status="processing",
+            cached=False,
         )
 
     # Create new job
@@ -68,6 +80,9 @@ async def start_analysis(request: AnalyzeRequest):
         "signals_found": 0,
         "result": None,
     })
+
+    # Mark this as the running job for this ticker
+    set_running_job_for_ticker(ticker, job_id)
 
     # Start Celery task
     task = run_analysis_task.delay(job_id=job_id, ticker=ticker)

@@ -99,9 +99,17 @@ class APIClient {
       eventSource.close();
     });
 
-    eventSource.addEventListener("error", (event) => {
-      console.error("SSE error:", event);
-      onError("Connection error");
+    eventSource.addEventListener("error", (event: MessageEvent) => {
+      try {
+        // Parse the error message from the backend
+        const data = JSON.parse(event.data);
+        console.warn("SSE error (handled):", data.error);
+        onError(data.error || "Analysis failed");
+      } catch {
+        // If we can't parse, it's likely a connection error
+        console.warn("SSE connection error (handled)");
+        onError("Connection error - please try again");
+      }
       eventSource.close();
     });
 

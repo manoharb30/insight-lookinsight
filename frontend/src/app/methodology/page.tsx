@@ -10,8 +10,8 @@ export default function MethodologyPage() {
             SEC Insights
           </Link>
           <div className="flex items-center gap-6">
-            <Link href="/pricing" className="text-gray-600 hover:text-gray-900">
-              Pricing
+            <Link href="/compare" className="text-gray-600 hover:text-gray-900">
+              Compare
             </Link>
             <Link href="/" className="text-gray-600 hover:text-gray-900">
               Analyze

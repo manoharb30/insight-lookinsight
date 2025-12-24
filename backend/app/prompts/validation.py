@@ -1,194 +1,123 @@
-"""Validation rules and prompts for signal validation."""
+"""LLM prompts for signal validation."""
 
-from typing import Dict, Any, List
+# Signal types for reference
+VALID_SIGNAL_TYPES = [
+    "GOING_CONCERN",
+    "BANKRUPTCY_FILING",
+    "CEO_DEPARTURE",
+    "CFO_DEPARTURE",
+    "MASS_LAYOFFS",
+    "DEBT_DEFAULT",
+    "COVENANT_VIOLATION",
+    "AUDITOR_CHANGE",
+    "BOARD_RESIGNATION",
+    "DELISTING_WARNING",
+    "CREDIT_DOWNGRADE",
+    "ASSET_SALE",
+    "RESTRUCTURING",
+    "SEC_INVESTIGATION",
+    "MATERIAL_WEAKNESS",
+    "EQUITY_DILUTION",
+]
 
-# Signal-specific validation rules
-VALIDATION_RULES: Dict[str, Dict[str, Any]] = {
-    "CEO_DEPARTURE": {
-        "must_contain_any": ["resign", "step down", "stepped down", "terminate", "depart", "left", "leaving"],
-        "must_not_contain": ["appointed", "promoted", "continues as", "will remain", "named as", "hired"],
-        "require_person": True,
-        "min_confidence": 0.7,
-        "description": "CEO must be LEAVING the position, not being appointed or staying",
-    },
-    "CFO_DEPARTURE": {
-        "must_contain_any": ["resign", "step down", "stepped down", "terminate", "depart", "left", "leaving"],
-        "must_not_contain": ["appointed", "promoted", "continues as", "will remain", "named as", "hired"],
-        "require_person": True,
-        "min_confidence": 0.7,
-        "description": "CFO must be LEAVING the position, not being appointed or staying",
-    },
-    "GOING_CONCERN": {
-        "must_contain_any": ["going concern", "substantial doubt", "ability to continue", "continue as a going concern"],
-        "min_confidence": 0.8,
-        "min_severity": 5,
-        "description": "Must have explicit language about doubt of survival",
-    },
-    "MASS_LAYOFFS": {
-        "must_contain_any": ["layoff", "workforce reduction", "headcount reduction", "job cuts", "employees", "positions"],
-        "require_quantity": True,  # Needs percentage or number
-        "min_threshold_percent": 0.10,  # 10% of workforce
-        "min_threshold_count": 100,  # Or 100+ employees
-        "min_confidence": 0.7,
-        "description": "Must have significant workforce reduction (>10% or >100 employees)",
-    },
-    "DEBT_DEFAULT": {
-        "must_contain_any": ["default", "acceleration", "failed to pay", "event of default", "missed payment"],
-        "min_confidence": 0.8,
-        "min_severity": 5,
-        "description": "Must have explicit default or payment failure language",
-    },
-    "COVENANT_VIOLATION": {
-        "must_contain_any": ["covenant", "waiver", "breach", "violation", "non-compliance"],
-        "min_confidence": 0.7,
-        "description": "Must have explicit covenant breach or waiver",
-    },
-    "AUDITOR_CHANGE": {
-        "must_contain_any": ["dismissed", "resigned", "new auditor", "change in auditor", "engaged", "independent registered"],
-        "must_not_contain": ["no disagreements"],  # If no disagreements, might be routine
-        "min_confidence": 0.7,
-        "description": "Change in independent auditor",
-    },
-    "BOARD_RESIGNATION": {
-        "must_contain_any": ["resigned from the board", "director resign", "stepped down from board", "departed from board"],
-        "must_not_contain": ["appointed", "elected", "named to board"],
-        "require_person": True,
-        "min_confidence": 0.6,
-        "description": "Director must be leaving the board, not joining",
-    },
-    "DELISTING_WARNING": {
-        "must_contain_any": ["nasdaq", "nyse", "delisting", "compliance", "deficiency", "listing standard"],
-        "min_confidence": 0.8,
-        "min_severity": 5,
-        "description": "Exchange compliance warning or delisting notice",
-    },
-    "CREDIT_DOWNGRADE": {
-        "must_contain_any": ["moody's", "s&p", "fitch", "downgrade", "rating", "lowered"],
-        "must_not_contain": ["upgrade", "affirmed", "maintained"],
-        "min_confidence": 0.7,
-        "description": "Credit rating must be downgraded, not upgraded or affirmed",
-    },
-    "ASSET_SALE": {
-        "must_contain_any": ["sale of assets", "disposition", "divest", "sold", "selling"],
-        "min_confidence": 0.6,
-        "description": "Significant asset sale or divestiture",
-    },
-    "RESTRUCTURING": {
-        "must_contain_any": ["restructuring", "reorganization", "chapter 11", "bankruptcy", "restructure"],
-        "min_confidence": 0.7,
-        "min_severity": 4,
-        "description": "Formal restructuring or reorganization plan",
-    },
-    "SEC_INVESTIGATION": {
-        "must_contain_any": ["subpoena", "sec", "investigation", "wells notice", "enforcement", "inquiry"],
-        "min_confidence": 0.7,
-        "description": "SEC investigation or enforcement action",
-    },
-    "MATERIAL_WEAKNESS": {
-        "must_contain_any": ["material weakness", "internal control", "disclosure controls", "significant deficiency"],
-        "min_confidence": 0.7,
-        "description": "Internal control deficiency or material weakness",
-    },
-    "EQUITY_DILUTION": {
-        "must_contain_any": ["at-the-market", "atm", "equity offering", "stock issuance", "registered direct"],
-        "min_confidence": 0.6,
-        "description": "Equity issuance that may dilute shareholders",
-    },
-}
+# =============================================================================
+# LLM VALIDATION PROMPT
+# =============================================================================
 
-# False positive patterns - signals that look real but aren't
-FALSE_POSITIVE_PATTERNS = {
-    "CEO_DEPARTURE": [
-        "appointed as CEO",
-        "named CEO",
-        "will continue as",
-        "remains as CEO",
-        "effective immediately, .* has been appointed",
-        "successor .* has been appointed",
-    ],
-    "CFO_DEPARTURE": [
-        "appointed as CFO",
-        "named CFO",
-        "will continue as",
-        "remains as CFO",
-        "effective immediately, .* has been appointed",
-    ],
-    "GOING_CONCERN": [
-        "no going concern",
-        "absence of .* going concern",
-        "do not believe .* going concern",
-        "no substantial doubt",
-    ],
-    "DEBT_DEFAULT": [
-        "no default",
-        "waived the default",
-        "cured the default",
-        "no event of default",
-    ],
-    "MASS_LAYOFFS": [
-        "hired .* employees",
-        "added .* positions",
-        "increased headcount",
-    ],
-}
+LLM_VALIDATION_PROMPT = """You are an expert SEC filing analyst validating extracted bankruptcy distress signals.
 
-# GPT-4o validation prompt
-SIGNAL_VALIDATION_PROMPT = """You are an expert at validating financial distress signals extracted from SEC filings.
+## SIGNAL TO VALIDATE
 
-Your task is to verify that each signal:
-1. Has evidence that actually supports the signal type
-2. Is not a false positive (e.g., an appointment mistaken for a departure)
-3. Has accurate severity and confidence scores
-
-## Signal Being Validated:
 Type: {signal_type}
-Evidence: {evidence}
-Date: {date}
+Evidence: "{evidence}"
+Severity: {severity}/10
+Filing Type: {filing_type}
+Filing Date: {filing_date}
 Person: {person}
-Original Severity: {severity}
-Original Confidence: {confidence}
 
-## Validation Rules for {signal_type}:
-{validation_rules}
+## SIGNAL TYPE DEFINITIONS
 
-## Your Task:
-1. Verify the evidence supports this signal type
-2. Check for false positive patterns
-3. Adjust severity (1-10) and confidence (0.0-1.0) if needed
-4. Provide reasoning
+- GOING_CONCERN: Auditor or management expresses substantial doubt about ability to continue operations
+- BANKRUPTCY_FILING: Company files for Chapter 7 liquidation, Chapter 11 reorganization, or enters receivership
+- CEO_DEPARTURE: Chief Executive Officer leaves (resignation, termination, retirement) - NOT appointments
+- CFO_DEPARTURE: Chief Financial Officer leaves - NOT appointments
+- BOARD_RESIGNATION: Director resigns from board - NOT appointments or retirements at term end
+- MASS_LAYOFFS: Workforce reduction >10% or >100 employees
+- DEBT_DEFAULT: Missed payment, event of default, acceleration of debt
+- COVENANT_VIOLATION: Breach of loan covenants, waiver requests
+- AUDITOR_CHANGE: Change of independent auditor (not internal audit)
+- DELISTING_WARNING: Exchange compliance notice, listing standard violation
+- CREDIT_DOWNGRADE: Rating agency downgrades credit rating
+- ASSET_SALE: Sale of significant business assets or subsidiaries
+- RESTRUCTURING: Debt restructuring, exchange offers, amendment of debt terms, reorganization
+- SEC_INVESTIGATION: SEC subpoena, enforcement action, Wells notice
+- MATERIAL_WEAKNESS: Internal control deficiency disclosed
+- EQUITY_DILUTION: Stock issuance, equity offering, ATM program, convertible notes
 
-## Response Format (JSON):
+## CRITICAL DISTINCTION - BANKRUPTCY_FILING vs GOING_CONCERN
+
+BANKRUPTCY_FILING requires an ACTUAL filing event:
+- "On [date], the Company filed Chapter 11"
+- "has commenced bankruptcy proceedings"
+- "filed a voluntary petition for relief"
+- Must contain: specific date + past tense "filed" + "Chapter 11/7"
+
+If evidence contains conditional language (may/could/if/might/unlikely),
+it is NOT BANKRUPTCY_FILING - reject or reclassify as GOING_CONCERN.
+
+Examples to REJECT as BANKRUPTCY_FILING:
+- "may be forced to file bankruptcy" → NOT a filing, reject
+- "could result in bankruptcy proceedings" → NOT a filing, reject
+- "if we fail, we may need to commence bankruptcy" → NOT a filing, reject
+
+## VALIDATION QUESTIONS
+
+1. **Correct Classification**: Does the evidence support this signal type?
+   - "supplemental indentures" + "exchange offers" = RESTRUCTURING ✓
+   - "appointed as new CEO" = NOT CEO_DEPARTURE ✗
+
+2. **Genuine Distress**: Is this a warning sign, not routine business or positive news?
+   - "debt restructuring to avoid default" = distress ✓
+   - "routine refinancing at lower rate" = not distress ✗
+
+3. **Severity Appropriate**: Does severity match the evidence?
+   - 1-3: Minor, routine
+   - 4-6: Moderate concern
+   - 7-8: Significant risk
+   - 9-10: Critical/imminent bankruptcy
+
+## RESPONSE FORMAT (JSON)
+
 {{
-  "is_valid": true/false,
-  "adjusted_severity": 1-10,
-  "adjusted_confidence": 0.0-1.0,
-  "rejection_reason": "reason if rejected or null",
-  "validation_notes": "brief explanation of validation decision"
+  "is_valid": true or false,
+  "corrected_type": "SIGNAL_TYPE" if misclassified, otherwise null,
+  "corrected_severity": 1-10 if severity is wrong, otherwise null,
+  "is_distress_signal": true or false,
+  "rejection_reason": "brief reason" if is_valid is false, otherwise null,
+  "confidence": 0.0-1.0
 }}
 
-Be strict - reject signals that don't clearly meet the criteria.
-"""
+## EXAMPLES
 
-# Evidence verification prompt
-EVIDENCE_VERIFICATION_PROMPT = """Verify that the following evidence quote exists in the source text and supports the claimed signal.
+Example 1 - Valid RESTRUCTURING:
+Evidence: "the Company entered into supplemental indentures with respect to each series of Existing Notes"
+Response: {{"is_valid": true, "corrected_type": null, "corrected_severity": null, "is_distress_signal": true, "rejection_reason": null, "confidence": 0.9}}
 
-Signal Type: {signal_type}
-Claimed Evidence: "{evidence}"
+Example 2 - Misclassified (appointment, not departure):
+Type: CEO_DEPARTURE
+Evidence: "John Smith was appointed as Chief Executive Officer effective immediately"
+Response: {{"is_valid": false, "corrected_type": null, "corrected_severity": null, "is_distress_signal": false, "rejection_reason": "This is an appointment, not a departure", "confidence": 0.95}}
 
-Source Text:
----
-{source_text}
----
+Example 3 - Not a distress signal:
+Type: EQUITY_DILUTION
+Evidence: "The company completed a successful equity raise to fund expansion"
+Response: {{"is_valid": false, "corrected_type": null, "corrected_severity": null, "is_distress_signal": false, "rejection_reason": "Growth financing, not distress dilution", "confidence": 0.85}}
 
-Does this evidence:
-1. Exist in the source text (exact or near-exact match)?
-2. Support the claimed signal type?
+Example 4 - Correct type but wrong severity:
+Type: MASS_LAYOFFS
+Evidence: "The company reduced headcount by 50% effective immediately"
+Severity: 4
+Response: {{"is_valid": true, "corrected_type": null, "corrected_severity": 8, "is_distress_signal": true, "rejection_reason": null, "confidence": 0.9}}
 
-Response (JSON):
-{{
-  "evidence_found": true/false,
-  "match_quality": "exact"/"partial"/"not_found",
-  "supports_signal": true/false,
-  "corrected_evidence": "the actual matching text if different, or null"
-}}
+Now validate the signal above. Be accurate and concise.
 """

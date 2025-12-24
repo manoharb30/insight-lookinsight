@@ -1,45 +1,23 @@
-"""Agent 4: Risk Scorer - Calculates bankruptcy risk score with pattern matching."""
+"""Agent 4: Risk Scorer - Calculates bankruptcy risk score with predictive weights and combinations."""
 
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.services.neo4j_service import neo4j_service
+from app.tools.scoring import risk_scorer
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-# Signal weights for risk calculation
-SIGNAL_WEIGHTS = {
-    "GOING_CONCERN": 25,
-    "DEBT_DEFAULT": 20,
-    "DELISTING_WARNING": 15,
-    "MASS_LAYOFFS": 15,
-    "COVENANT_VIOLATION": 12,
-    "CEO_DEPARTURE": 10,
-    "CFO_DEPARTURE": 10,
-    "CREDIT_DOWNGRADE": 10,
-    "RESTRUCTURING": 10,
-    "AUDITOR_CHANGE": 8,
-    "SEC_INVESTIGATION": 8,
-    "ASSET_SALE": 8,
-    "MATERIAL_WEAKNESS": 5,
-    "BOARD_RESIGNATION": 5,
-    "EQUITY_DILUTION": 5,
-}
 
 
 @dataclass
 class SignalContribution:
     """Individual signal's contribution to risk score."""
     signal_type: str
-    base_weight: int
-    severity_mult: float
-    recency_mult: float
-    confidence_mult: float
+    predictive_weight: int
+    severity: int
     contribution: float
-    date: str
 
 
 @dataclass
@@ -66,15 +44,29 @@ class SimilarCompany:
 
 
 @dataclass
+class CombinationPattern:
+    """Detected dangerous signal combination."""
+    pattern: str
+    signals: List[str]
+    multiplier: float
+    description: str
+    risk_level: str
+
+
+@dataclass
 class RiskAssessment:
     """Complete risk assessment output."""
     ticker: str
     risk_score: int
     risk_level: str
+    base_score: int
+    combination_bonus: int
+    velocity_bonus: int
     signal_contributions: List[SignalContribution]
+    combinations_detected: List[CombinationPattern]
+    velocity_info: Dict[str, Any]
     pattern_matches: List[PatternMatch]
     similar_companies: List[SimilarCompany]
-    pattern_bonus: float
     assessment_notes: str
     error: Optional[str] = None
 
@@ -83,15 +75,16 @@ class RiskScorerAgent:
     """
     Agent 4: Bankruptcy Risk Assessment Specialist
 
-    Role: Calculate overall risk based on signal patterns
-    Goal: Provide accurate risk score with pattern matching insights
-    Backstory: Quantitative analyst who has studied 500+ corporate bankruptcies
+    Calculates risk scores using:
+    - Predictive weights (not just severity)
+    - Signal combinations (patterns that predict bankruptcy)
+    - Signal velocity (how fast signals are accumulating)
+    - Pattern matching against known bankruptcies (Neo4j)
     """
 
     def __init__(self):
         self.role = "Bankruptcy Risk Assessment Specialist"
-        self.goal = "Calculate probability of bankruptcy based on signal patterns"
-        self.backstory = "Quantitative analyst who has studied 500+ corporate bankruptcies"
+        self.goal = "Calculate predictive risk scores from distress signals"
 
     async def run(
         self,
@@ -114,22 +107,65 @@ class RiskScorerAgent:
             await update_callback("Calculating risk score...")
 
         try:
-            # Step 1: Calculate base risk score from signals
-            contributions, base_score = self._calculate_base_score(signals)
+            # Step 1: Calculate comprehensive risk score using new scoring
+            score_result = risk_scorer.calculate_risk_score(signals)
 
             if update_callback:
-                await update_callback(f"Base score: {base_score:.1f} from {len(signals)} signals")
+                msg = f"Base score: {score_result['base_score']} from {len(signals)} signals"
+                if score_result['combination_bonus'] > 0:
+                    msg += f" | Combo bonus: +{score_result['combination_bonus']}"
+                if score_result['velocity_bonus'] > 0:
+                    msg += f" | Velocity bonus: +{score_result['velocity_bonus']}"
+                await update_callback(msg)
 
-            # Step 2: Find pattern matches to known bankruptcies
+            # Convert signal breakdown to SignalContribution objects
+            signal_contributions = [
+                SignalContribution(
+                    signal_type=s["type"],
+                    predictive_weight=s["predictive_weight"],
+                    severity=s["severity"],
+                    contribution=s["contribution"],
+                )
+                for s in score_result["signal_breakdown"]
+            ]
+
+            # Convert combinations to CombinationPattern objects
+            combinations_detected = [
+                CombinationPattern(
+                    pattern=c["pattern"],
+                    signals=c["signals"],
+                    multiplier=c["multiplier"],
+                    description=c["description"],
+                    risk_level=c["risk_level"],
+                )
+                for c in score_result["combinations_detected"]
+            ]
+
+            # Log combination detections
+            if combinations_detected:
+                combo_names = [c.pattern for c in combinations_detected]
+                logger.info(f"Risk patterns detected: {', '.join(combo_names)}")
+                if update_callback:
+                    await update_callback(f"Detected patterns: {', '.join(combo_names)}")
+
+            # Log velocity
+            velocity_info = score_result["velocity_info"]
+            if velocity_info.get("velocity") != "LOW":
+                logger.info(
+                    f"Signal velocity: {velocity_info['velocity']} "
+                    f"({velocity_info['signals_per_90_days']} signals in 90 days)"
+                )
+
+            # Step 2: Find pattern matches to known bankruptcies (Neo4j)
             pattern_matches = await self._find_bankruptcy_patterns(ticker)
-            pattern_bonus = self._calculate_pattern_bonus(pattern_matches)
+            neo4j_bonus = self._calculate_pattern_bonus(pattern_matches)
 
             if update_callback and pattern_matches:
                 await update_callback(
                     f"Found {len(pattern_matches)} bankruptcy pattern matches"
                 )
 
-            # Step 3: Find similar companies
+            # Step 3: Find similar companies (Neo4j)
             similar_companies = await self._find_similar_companies(ticker)
 
             if update_callback and similar_companies:
@@ -137,16 +173,31 @@ class RiskScorerAgent:
                     f"Found {len(similar_companies)} similar companies"
                 )
 
-            # Step 4: Calculate final score
-            final_score = min(100, int(base_score + pattern_bonus))
-            risk_level = self._get_risk_level(final_score)
+            # Step 4: Calculate final score (include Neo4j bonus)
+            final_score = min(100, score_result["score"] + int(neo4j_bonus))
+            risk_level = score_result["level"]
+            if final_score >= 70:
+                risk_level = "CRITICAL"
+            elif final_score >= 50:
+                risk_level = "HIGH"
 
             # Step 5: Update company risk score in Neo4j
             await self._update_company_risk_score(ticker, final_score)
 
             # Generate assessment notes
             notes = self._generate_assessment_notes(
-                signals, contributions, pattern_matches, final_score
+                signals,
+                signal_contributions,
+                combinations_detected,
+                velocity_info,
+                pattern_matches,
+                final_score,
+            )
+
+            logger.info(
+                f"Risk score for {ticker}: {final_score} ({risk_level}) "
+                f"[base: {score_result['base_score']}, combo: +{score_result['combination_bonus']}, "
+                f"velocity: +{score_result['velocity_bonus']}, neo4j: +{int(neo4j_bonus)}]"
             )
 
             if update_callback:
@@ -158,10 +209,14 @@ class RiskScorerAgent:
                 ticker=ticker,
                 risk_score=final_score,
                 risk_level=risk_level,
-                signal_contributions=contributions,
+                base_score=score_result["base_score"],
+                combination_bonus=score_result["combination_bonus"],
+                velocity_bonus=score_result["velocity_bonus"],
+                signal_contributions=signal_contributions,
+                combinations_detected=combinations_detected,
+                velocity_info=velocity_info,
                 pattern_matches=pattern_matches,
                 similar_companies=similar_companies,
-                pattern_bonus=pattern_bonus,
                 assessment_notes=notes,
             )
 
@@ -173,87 +228,33 @@ class RiskScorerAgent:
                 ticker=ticker,
                 risk_score=base_score,
                 risk_level=self._get_risk_level(base_score),
+                base_score=base_score,
+                combination_bonus=0,
+                velocity_bonus=0,
                 signal_contributions=[],
+                combinations_detected=[],
+                velocity_info={"velocity": "LOW", "multiplier": 1.0},
                 pattern_matches=[],
                 similar_companies=[],
-                pattern_bonus=0,
                 assessment_notes="Risk calculated with basic method due to error",
                 error=str(e),
             )
 
-    def _calculate_base_score(
-        self, signals: List[Dict[str, Any]]
-    ) -> tuple[List[SignalContribution], float]:
-        """Calculate base risk score from signals with weights."""
-        contributions = []
-        total_score = 0.0
-
-        for signal in signals:
-            signal_type = signal.get("type", "")
-            severity = signal.get("severity", 5)
-            confidence = signal.get("confidence", 0.8)
-            date_str = signal.get("date", "")
-
-            # Get base weight
-            base_weight = SIGNAL_WEIGHTS.get(signal_type, 5)
-
-            # Severity multiplier (1-10 scale, normalize to 0.1-1.0)
-            severity_mult = severity / 10.0
-
-            # Confidence multiplier
-            confidence_mult = confidence
-
-            # Recency multiplier
-            recency_mult = self._calculate_recency_weight(date_str)
-
-            # Calculate contribution
-            contribution = base_weight * severity_mult * confidence_mult * recency_mult
-            total_score += contribution
-
-            contributions.append(SignalContribution(
-                signal_type=signal_type,
-                base_weight=base_weight,
-                severity_mult=severity_mult,
-                recency_mult=recency_mult,
-                confidence_mult=confidence_mult,
-                contribution=round(contribution, 2),
-                date=date_str,
-            ))
-
-        # Sort by contribution (highest first)
-        contributions.sort(key=lambda x: x.contribution, reverse=True)
-
-        return contributions, total_score
-
-    def _calculate_recency_weight(self, date_str: str) -> float:
-        """Calculate recency weight - recent signals count more."""
-        if not date_str:
-            return 1.0
-
-        try:
-            signal_date = datetime.strptime(date_str, "%Y-%m-%d")
-            days_ago = (datetime.now() - signal_date).days
-
-            if days_ago <= 180:  # Last 6 months
-                return 1.5
-            elif days_ago <= 365:  # 6-12 months
-                return 1.0
-            elif days_ago <= 730:  # 1-2 years
-                return 0.7
-            else:
-                return 0.5
-        except ValueError:
-            return 1.0
-
     def _calculate_simple_score(self, signals: List[Dict[str, Any]]) -> int:
         """Simple fallback score calculation."""
+        from app.core.constants import PREDICTIVE_WEIGHTS, BASE_SEVERITY
+
         score = 0
         for signal in signals:
             signal_type = signal.get("type", "")
-            severity = signal.get("severity", 5)
-            weight = SIGNAL_WEIGHTS.get(signal_type, 5)
-            score += weight * (severity / 7.0)
-        return min(100, int(score))
+            severity = signal.get("severity", BASE_SEVERITY.get(signal_type, 5))
+            weight = PREDICTIVE_WEIGHTS.get(signal_type, 5)
+            score += weight * (severity / 10.0)
+
+        # Normalize to 0-100
+        max_possible = len(signals) * 10 if signals else 1
+        normalized = (score / max_possible) * 100
+        return min(100, int(normalized))
 
     async def _find_bankruptcy_patterns(self, ticker: str) -> List[PatternMatch]:
         """Query Neo4j for pattern matches against known bankruptcies."""
@@ -306,7 +307,7 @@ class RiskScorerAgent:
         if best_match.similarity_score > 0.5:
             bonus = 10 * best_match.similarity_score
             logger.info(
-                f"Pattern bonus: +{bonus:.1f} from match to {best_match.ticker} "
+                f"Neo4j pattern bonus: +{bonus:.1f} from match to {best_match.ticker} "
                 f"({best_match.similarity_score:.0%} similarity)"
             )
             return bonus
@@ -331,41 +332,51 @@ class RiskScorerAgent:
         elif score >= 50:
             return "HIGH"
         elif score >= 30:
-            return "MEDIUM"
+            return "ELEVATED"
         return "LOW"
 
     def _generate_assessment_notes(
         self,
         signals: List[Dict[str, Any]],
         contributions: List[SignalContribution],
+        combinations: List[CombinationPattern],
+        velocity_info: Dict[str, Any],
         pattern_matches: List[PatternMatch],
         final_score: int,
     ) -> str:
         """Generate human-readable assessment notes."""
         notes = []
 
-        # Signal summary
+        # Combination pattern warnings (most important)
+        if combinations:
+            critical_combos = [c for c in combinations if c.risk_level == "CRITICAL"]
+            if critical_combos:
+                combo_names = [c.pattern.replace("_", " ").title() for c in critical_combos]
+                notes.append(f"CRITICAL PATTERNS: {', '.join(combo_names)}")
+
+        # Velocity warning
+        if velocity_info.get("velocity") == "EXTREME":
+            notes.append(
+                f"EXTREME VELOCITY: {velocity_info['signals_per_90_days']} signals in 90 days"
+            )
+        elif velocity_info.get("velocity") == "HIGH":
+            notes.append(
+                f"High velocity: {velocity_info['signals_per_90_days']} signals in 90 days"
+            )
+
+        # Top contributors
         if contributions:
             top_contributors = contributions[:3]
             top_types = [c.signal_type.replace("_", " ").title() for c in top_contributors]
             notes.append(f"Top risk factors: {', '.join(top_types)}")
 
-        # Pattern match warning
+        # Pattern match warning (Neo4j)
         if pattern_matches:
             best = max(pattern_matches, key=lambda x: x.similarity_score)
             if best.similarity_score > 0.6:
                 notes.append(
-                    f"WARNING: Signal pattern {best.similarity_score:.0%} similar to "
-                    f"{best.name} ({best.ticker}) which filed bankruptcy"
+                    f"Pattern {best.similarity_score:.0%} similar to {best.name} (bankrupt)"
                 )
-
-        # Recency warning
-        recent_signals = [
-            s for s in signals
-            if s.get("date") and self._calculate_recency_weight(s.get("date", "")) >= 1.5
-        ]
-        if recent_signals:
-            notes.append(f"{len(recent_signals)} signals detected in last 6 months")
 
         # Overall assessment
         if final_score >= 70:
@@ -373,7 +384,7 @@ class RiskScorerAgent:
         elif final_score >= 50:
             notes.append("HIGH: Significant warning signs detected")
         elif final_score >= 30:
-            notes.append("MEDIUM: Some concerns warrant monitoring")
+            notes.append("ELEVATED: Some concerns warrant monitoring")
         else:
             notes.append("LOW: Limited distress indicators")
 
