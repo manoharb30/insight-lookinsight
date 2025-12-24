@@ -20,6 +20,19 @@ class RiskScorer:
     1. Individual signal predictive weights
     2. Signal combination patterns
     3. Signal velocity (frequency over time)
+
+    KNOWN LIMITATION:
+    Scores reflect signals within the 24-month lookback window. Companies that
+    have recovered from distress (e.g., completed restructuring, removed going
+    concern, returned to profitability) may show elevated scores until older
+    signals age out of the window.
+
+    Example: CVNA scored CRITICAL in 2023 due to real distress signals. By 2025
+    the company recovered, but signals remain in the window. The system detects
+    distress but not recovery.
+
+    FUTURE ENHANCEMENT: Add resolution signals (GOING_CONCERN_REMOVED,
+    RESTRUCTURING_COMPLETED, DEBT_REFINANCED) that offset negative signals.
     """
 
     def __init__(self):
@@ -198,9 +211,12 @@ class RiskScorer:
                 "contribution": round(signal_score, 2),
             })
 
-        # Normalize base score to 0-70 range (leave room for bonuses)
-        max_possible = len(signals) * 10  # Max if all weights were 10
-        base_score = min(70, (total_weight / max(max_possible, 1)) * 100)
+        # Additive scoring: sum contributions directly, cap at 85
+        # Each signal contributes: weight * (severity/10), max ~10 per signal
+        # More signals = higher risk (additive, not averaged)
+        # Scale factor: 5 contribution points -> ~50 base score
+        # Cap at 85 to leave room for bonuses and differentiate from bankruptcy
+        base_score = min(85, total_weight * 10)
 
         # 2. Calculate combination bonus
         combinations = self.detect_combinations(signals)
@@ -236,11 +252,18 @@ class RiskScorer:
         final_score = round(final_score)
 
         # Determine risk level
-        if final_score >= 70:
+        # 86-100: BANKRUPTCY (filed or imminent)
+        # 66-85:  CRITICAL (severe distress, bankruptcy likely)
+        # 46-65:  HIGH (multiple distress signals)
+        # 26-45:  ELEVATED (some warning signs)
+        # 0-25:   LOW (normal operations)
+        if final_score >= 86:
+            level = "BANKRUPTCY"
+        elif final_score >= 66:
             level = "CRITICAL"
-        elif final_score >= 50:
+        elif final_score >= 46:
             level = "HIGH"
-        elif final_score >= 30:
+        elif final_score >= 26:
             level = "ELEVATED"
         else:
             level = "LOW"

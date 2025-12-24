@@ -62,8 +62,8 @@ Accession Number: {accession_number}
 ## SIGNAL TYPES TO EXTRACT
 
 1. BANKRUPTCY_FILING - Company files for Chapter 7, Chapter 11 bankruptcy, or receivership (Item 1.03)
-2. CEO_DEPARTURE - CEO resigns, is terminated, or steps down (NOT appointments)
-3. CFO_DEPARTURE - CFO resigns, is terminated, or steps down (NOT appointments)
+2. CEO_DEPARTURE - Current CEO leaving role: resigns, is terminated, steps down, retirement, OR is being replaced/succeeded by new CEO. Key trigger: existing CEO will no longer be CEO.
+3. CFO_DEPARTURE - Current CFO leaving role: resigns, is terminated, steps down, retirement, OR is being replaced/succeeded by new CFO.
 4. BOARD_RESIGNATION - Director resigns from board (NOT appointments)
 5. MASS_LAYOFFS - Workforce reduction >10% or >100 employees
 6. DEBT_DEFAULT - Missed payments, acceleration, events of default
@@ -163,15 +163,21 @@ A going concern warning is when the auditor or management expresses "substantial
 
 ## IMPORTANT DISTINCTIONS
 
-POSITIVE (IS a going concern signal):
+POSITIVE (IS a going concern signal - extract it):
 - "There is substantial doubt about our ability to continue as a going concern"
 - "The auditor's report includes a going concern emphasis paragraph"
 - "Conditions exist that raise substantial doubt"
+- "Our ability to continue is contingent upon..."
+- "If we fail to raise capital, we may not be able to continue"
+- "There can be no assurance that we will be able to continue"
+- "We may not have sufficient capital to fund operations"
+- Any language expressing uncertainty about company's survival
 
-NEGATIVE (NOT a going concern signal):
+NEGATIVE (NOT a going concern signal - do not extract):
 - "No substantial doubt about ability to continue"
 - "Management believes the company will continue as a going concern"
 - "The going concern issue has been resolved"
+- Simply mentioning "going concern" in accounting policy context without expressing doubt
 
 ## RESPONSE FORMAT (JSON)
 

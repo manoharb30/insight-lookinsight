@@ -89,7 +89,8 @@ class FilingFetcherAgent:
                     f"Downloading filing {i + 1}/{len(filings)}..."
                 )
 
-            filing_data = edgar_client.download_filing(filing)
+            # Use item extraction for 10-K/10-Q to get relevant sections
+            filing_data = edgar_client.download_filing_with_items(filing)
             if "error" not in filing_data:
                 downloaded_filings.append(filing_data)
                 filing_type = filing_data.get("filing_type", "")

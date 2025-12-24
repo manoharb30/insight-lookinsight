@@ -175,11 +175,19 @@ class RiskScorerAgent:
 
             # Step 4: Calculate final score (include Neo4j bonus)
             final_score = min(100, score_result["score"] + int(neo4j_bonus))
-            risk_level = score_result["level"]
-            if final_score >= 70:
+
+            # Recalculate level if Neo4j bonus changed score
+            # Thresholds: 86+ BANKRUPTCY, 66-85 CRITICAL, 46-65 HIGH, 26-45 ELEVATED, 0-25 LOW
+            if final_score >= 86:
+                risk_level = "BANKRUPTCY"
+            elif final_score >= 66:
                 risk_level = "CRITICAL"
-            elif final_score >= 50:
+            elif final_score >= 46:
                 risk_level = "HIGH"
+            elif final_score >= 26:
+                risk_level = "ELEVATED"
+            else:
+                risk_level = "LOW"
 
             # Step 5: Update company risk score in Neo4j
             await self._update_company_risk_score(ticker, final_score)
@@ -327,11 +335,18 @@ class RiskScorerAgent:
 
     def _get_risk_level(self, score: int) -> str:
         """Convert numeric score to risk level."""
-        if score >= 70:
+        # 86-100: BANKRUPTCY (filed or imminent)
+        # 66-85:  CRITICAL (severe distress, bankruptcy likely)
+        # 46-65:  HIGH (multiple distress signals)
+        # 26-45:  ELEVATED (some warning signs)
+        # 0-25:   LOW (normal operations)
+        if score >= 86:
+            return "BANKRUPTCY"
+        elif score >= 66:
             return "CRITICAL"
-        elif score >= 50:
+        elif score >= 46:
             return "HIGH"
-        elif score >= 30:
+        elif score >= 26:
             return "ELEVATED"
         return "LOW"
 
