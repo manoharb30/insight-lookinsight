@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
 
+    # Anthropic Claude
+    anthropic_api_key: str = ""
+
     # Neo4j
     neo4j_uri: str
     neo4j_username: str

@@ -246,7 +246,7 @@ class Neo4jService:
             s.severity = $severity,
             s.confidence = $confidence,
             s.evidence = $evidence,
-            s.date = $date,
+            s.date = CASE WHEN $date IS NOT NULL AND $date <> '' THEN date($date) ELSE null END,
             s.item_number = $item_number,
             s.person = $person,
             s.detected_at = datetime()
@@ -305,11 +305,11 @@ class Neo4jService:
     async def find_similar_companies(
         self, ticker: str, limit: int = 5
     ) -> List[Dict[str, Any]]:
-        """Find companies with similar signal patterns."""
+        """Find companies with similar signal patterns based on shared signal types."""
         query = """
-        MATCH (c1:Company {ticker: $ticker})-[:FILED]->(:Filing)-[:CONTAINS]->(s1:Signal)
+        MATCH (c1:Company {ticker: $ticker})-[:HAS_SIGNAL]->(s1:Signal)
         WITH c1, COLLECT(DISTINCT s1.type) as target_signals
-        MATCH (c2:Company)-[:FILED]->(:Filing)-[:CONTAINS]->(s2:Signal)
+        MATCH (c2:Company)-[:HAS_SIGNAL]->(s2:Signal)
         WHERE c1 <> c2
         WITH c1, target_signals, c2, COLLECT(DISTINCT s2.type) as other_signals
         WITH c2,
@@ -319,7 +319,6 @@ class Neo4jService:
         RETURN c2.ticker as ticker,
                c2.name as name,
                c2.status as status,
-               c2.risk_score as risk_score,
                SIZE(common) as common_signals,
                common as common_signal_types,
                SIZE(common) * 1.0 / SIZE(other_signals) as similarity_score
@@ -405,6 +404,240 @@ class Neo4jService:
             await session.run(query, ticker=ticker, bankruptcy_date=bankruptcy_date)
 
         logger.info(f"Added known bankruptcy case: {ticker}")
+
+    async def build_signal_chain(self, ticker: str) -> int:
+        """
+        Create NEXT relationships between signals chronologically.
+
+        Returns:
+            Number of relationships created
+        """
+        query = """
+        MATCH (c:Company {ticker: $ticker})-[:FILED]->(:Filing)-[:CONTAINS]->(s:Signal)
+        WITH s ORDER BY s.date
+        WITH collect(s) as signals
+        UNWIND range(0, size(signals)-2) as i
+        WITH signals[i] as s1, signals[i+1] as s2
+        MERGE (s1)-[r:NEXT]->(s2)
+        SET r.days = duration.inDays(s1.date, s2.date).days
+        RETURN count(r) as relationships_created
+        """
+        try:
+            async with self.session() as session:
+                result = await session.run(query, ticker=ticker)
+                record = await result.single()
+                count = record["relationships_created"] if record else 0
+                logger.info(f"Built signal chain for {ticker}: {count} NEXT relationships")
+                return count
+        except Exception as e:
+            logger.error(f"Error building signal chain: {e}")
+            return 0
+
+    async def get_company_timeline(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """
+        Get complete signal timeline for a company.
+
+        Returns:
+            Dict with company info, signals, and timeline summary
+        """
+        query = """
+        MATCH (c:Company {ticker: $ticker})
+        OPTIONAL MATCH (c)-[:FILED]->(f:Filing)-[:CONTAINS]->(s:Signal)
+        OPTIONAL MATCH (s)-[next:NEXT]->(:Signal)
+        WITH c, s, f, next
+        ORDER BY s.date
+        WITH c, collect({
+            id: s.signal_id,
+            type: s.type,
+            date: toString(s.date),
+            evidence: s.evidence,
+            severity: s.severity,
+            confidence: s.confidence,
+            days_to_next: next.days,
+            item_number: s.item_number,
+            filing_accession: f.accession_number,
+            filing_type: f.filing_type,
+            filing_date: toString(f.filed_at),
+            filing_url: f.url
+        }) as signals
+        RETURN {
+            ticker: c.ticker,
+            name: c.name,
+            cik: c.cik,
+            status: c.status,
+            bankruptcy_date: toString(c.bankruptcy_date),
+            risk_score: c.risk_score,
+            risk_level: CASE
+                WHEN c.risk_score >= 86 THEN 'BANKRUPTCY'
+                WHEN c.risk_score >= 66 THEN 'CRITICAL'
+                WHEN c.risk_score >= 46 THEN 'HIGH'
+                WHEN c.risk_score >= 26 THEN 'ELEVATED'
+                ELSE 'LOW'
+            END
+        } as company,
+        [s IN signals WHERE s.id IS NOT NULL] as signals
+        """
+        try:
+            async with self.session() as session:
+                result = await session.run(query, ticker=ticker)
+                record = await result.single()
+                if not record:
+                    return None
+                return {
+                    "company": record["company"],
+                    "signals": record["signals"]
+                }
+        except Exception as e:
+            logger.error(f"Error getting company timeline: {e}")
+            return None
+
+    async def get_similar_cases_timeline(
+        self, ticker: str, min_overlap: int = 2, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Find companies with similar signal patterns, including their timelines.
+
+        Args:
+            ticker: Target company ticker
+            min_overlap: Minimum number of matching signals
+            limit: Maximum number of results
+
+        Returns:
+            List of similar cases with timeline data
+        """
+        query = """
+        MATCH (target:Company {ticker: $ticker})-[:FILED]->(:Filing)-[:CONTAINS]->(ts:Signal)
+        WITH target, collect(DISTINCT ts.type) as targetSignals
+
+        MATCH (other:Company)-[:FILED]->(:Filing)-[:CONTAINS]->(os:Signal)
+        WHERE other <> target
+          AND other.status IS NOT NULL
+        WITH target, targetSignals, other, collect(DISTINCT os.type) as otherSignals
+
+        WITH other, targetSignals, otherSignals,
+             [x IN targetSignals WHERE x IN otherSignals] as overlap
+        WHERE size(overlap) >= $min_overlap
+
+        OPTIONAL MATCH (other)-[:FILED]->(:Filing)-[:CONTAINS]->(s:Signal)
+        WITH other, overlap, otherSignals, s
+        ORDER BY s.date
+
+        WITH other, overlap, otherSignals, collect({
+            type: s.type,
+            date: toString(s.date),
+            severity: s.severity
+        }) as timeline
+
+        RETURN other.ticker as ticker,
+               other.name as name,
+               other.status as outcome,
+               toString(other.bankruptcy_date) as bankruptcy_date,
+               size(overlap) as overlap_count,
+               overlap as matching_signals,
+               size(overlap) * 1.0 / size(otherSignals) as similarity_score,
+               timeline
+        ORDER BY overlap_count DESC, similarity_score DESC
+        LIMIT $limit
+        """
+        try:
+            async with self.session() as session:
+                result = await session.run(
+                    query, ticker=ticker, min_overlap=min_overlap, limit=limit
+                )
+                records = await result.data()
+                return records
+        except Exception as e:
+            logger.error(f"Error getting similar cases timeline: {e}")
+            return []
+
+    async def store_signals_batch(
+        self,
+        ticker: str,
+        company_data: Dict[str, Any],
+        signals: List[Dict[str, Any]],
+    ) -> int:
+        """
+        Store company and all signals in a single transaction.
+
+        Args:
+            ticker: Company ticker
+            company_data: Company info dict
+            signals: List of signal dicts
+
+        Returns:
+            Number of signals stored
+        """
+        try:
+            # Store company first
+            await self.store_company(company_data)
+
+            stored = 0
+            for signal in signals:
+                filing_accession = signal.get("filing_accession", "")
+
+                # Store filing if we have accession
+                if filing_accession:
+                    await self.store_filing(ticker, {
+                        "accession_number": filing_accession,
+                        "filing_type": signal.get("filing_type", "8-K"),
+                        "filed_at": signal.get("date", ""),
+                        "url": signal.get("filing_url", ""),
+                    })
+
+                    # Store signal linked to filing
+                    await self.store_signal(ticker, filing_accession, {
+                        "signal_id": signal.get("signal_id") or signal.get("id"),
+                        "type": signal.get("type"),
+                        "severity": signal.get("severity", 5),
+                        "confidence": signal.get("confidence", 0.8),
+                        "evidence": signal.get("evidence", ""),
+                        "date": signal.get("date"),
+                        "item_number": signal.get("item_number", ""),
+                        "person": signal.get("person"),
+                    })
+                    stored += 1
+
+            # Build signal chain after all signals are stored
+            if stored > 1:
+                await self.build_signal_chain(ticker)
+
+            logger.info(f"Stored {stored} signals for {ticker}")
+            return stored
+
+        except Exception as e:
+            logger.error(f"Error storing signals batch: {e}")
+            raise DatabaseError("Neo4j", f"Failed to store signals batch: {e}")
+
+    async def get_timeline_stats(self, ticker: str) -> Dict[str, Any]:
+        """Get timeline statistics for a company."""
+        query = """
+        MATCH (c:Company {ticker: $ticker})-[:FILED]->(:Filing)-[:CONTAINS]->(s:Signal)
+        WITH c, s ORDER BY s.date
+        WITH c,
+             collect(s) as signals,
+             min(s.date) as first_date,
+             max(s.date) as last_date
+        RETURN {
+            ticker: c.ticker,
+            total_signals: size(signals),
+            first_signal: toString(first_date),
+            latest_signal: toString(last_date),
+            days_span: CASE WHEN first_date IS NOT NULL AND last_date IS NOT NULL
+                       THEN duration.inDays(first_date, last_date).days
+                       ELSE null END,
+            days_since_latest: CASE WHEN last_date IS NOT NULL
+                               THEN duration.inDays(last_date, date()).days
+                               ELSE null END
+        } as stats
+        """
+        try:
+            async with self.session() as session:
+                result = await session.run(query, ticker=ticker)
+                record = await result.single()
+                return record["stats"] if record else {}
+        except Exception as e:
+            logger.error(f"Error getting timeline stats: {e}")
+            return {}
 
 
 # Singleton instance

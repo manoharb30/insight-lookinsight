@@ -78,6 +78,8 @@ class SignalExtractorAgent:
                 "confidence": sig.confidence,
                 "evidence": sig.evidence,
                 "marker_phrase": sig.marker_phrase,
+                "summary": sig.summary,
+                "key_facts": sig.key_facts,
                 "evidence_verified": sig.evidence_verified,
                 "date": sig.event_date or sig.filing_date,
                 "person": sig.person,

@@ -2,8 +2,9 @@
 
 import asyncio
 import json
+import random
 from typing import List, Dict, Any, Tuple, Optional
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 
 from app.config import get_settings
 from app.prompts.validation import LLM_VALIDATION_PROMPT, VALID_SIGNAL_TYPES
@@ -26,7 +27,7 @@ class SignalValidator:
     def __init__(
         self,
         model: str = "gpt-4o-mini",
-        max_concurrent: int = 5,
+        max_concurrent: int = 3,
     ):
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model = model
@@ -35,6 +36,28 @@ class SignalValidator:
     def _get_semaphore(self) -> asyncio.Semaphore:
         """Create a new semaphore for the current event loop."""
         return asyncio.Semaphore(self.max_concurrent)
+
+    async def _call_with_retry(self, messages: List[Dict], max_retries: int = 5) -> Optional[str]:
+        """Call OpenAI API with exponential backoff retry on rate limit."""
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                    max_tokens=200,
+                )
+                return response.choices[0].message.content
+            except RateLimitError as e:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Rate limited, waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Rate limit exceeded after {max_retries} retries")
+                    raise
+        return None
 
     def _basic_validation(self, signal: Dict[str, Any]) -> Tuple[bool, str]:
         """
@@ -87,28 +110,23 @@ class SignalValidator:
                     person=signal.get("person") or "N/A",
                 )
 
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are an expert SEC filing analyst. Validate signals accurately. Return valid JSON only."
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                    max_tokens=300,
-                )
-
-                content = response.choices[0].message.content
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You are an expert SEC filing analyst. Validate signals accurately. Return valid JSON only."
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+                content = await self._call_with_retry(messages)
+                if not content:
+                    # If retry fails, reject the signal
+                    return (signal, False, "Rate limit exceeded")
                 result = json.loads(content)
 
                 is_valid = result.get("is_valid", False)
-                is_distress = result.get("is_distress_signal", True)
 
-                # Must be both valid AND a distress signal
-                if not is_valid or not is_distress:
+                # Only reject if classification is wrong
+                if not is_valid:
                     reason = result.get("rejection_reason", "Failed LLM validation")
                     signal["rejection_reason"] = f"LLM: {reason}"
                     logger.info(f"LLM rejected {signal.get('type')}: {reason}")

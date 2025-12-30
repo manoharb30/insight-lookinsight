@@ -1,12 +1,16 @@
 "use client";
 
-import { TimelineEvent, SIGNAL_DISPLAY } from "@/lib/types";
+import { TimelineEvent, SignalDetail, SIGNAL_DISPLAY } from "@/lib/types";
+
+// Support both TimelineEvent (from analysis) and SignalDetail (from Neo4j timeline)
+type TimelineItem = TimelineEvent | SignalDetail;
 
 interface SignalTimelineProps {
-  events: TimelineEvent[];
+  events: TimelineItem[];
+  showDaysToNext?: boolean;
 }
 
-export function SignalTimeline({ events }: SignalTimelineProps) {
+export function SignalTimeline({ events, showDaysToNext = true }: SignalTimelineProps) {
   if (!events || events.length === 0) {
     return (
       <div className="text-center py-8 text-gray-500">
@@ -36,6 +40,33 @@ export function SignalTimeline({ events }: SignalTimelineProps) {
     }
   };
 
+  const getDaysToNext = (event: TimelineItem): number | null => {
+    if ('days_to_next' in event) {
+      return event.days_to_next;
+    }
+    return null;
+  };
+
+  const getFilingType = (event: TimelineItem): string => {
+    if ('filing' in event && event.filing) {
+      return event.filing.type;
+    }
+    if ('filing_type' in event) {
+      return event.filing_type;
+    }
+    return '';
+  };
+
+  const getItemNumber = (event: TimelineItem): string => {
+    if ('filing' in event && event.filing) {
+      return event.filing.item || '';
+    }
+    if ('item_number' in event) {
+      return event.item_number;
+    }
+    return '';
+  };
+
   return (
     <div className="relative">
       {/* Timeline line */}
@@ -44,6 +75,9 @@ export function SignalTimeline({ events }: SignalTimelineProps) {
       <div className="space-y-4">
         {events.map((event, index) => {
           const display = SIGNAL_DISPLAY[event.type] || { label: event.type.replace(/_/g, " "), color: "gray" };
+          const daysToNext = getDaysToNext(event);
+          const filingType = getFilingType(event);
+          const itemNumber = getItemNumber(event);
 
           return (
             <div key={index} className="relative pl-10">
@@ -66,10 +100,24 @@ export function SignalTimeline({ events }: SignalTimelineProps) {
                 <p className="text-sm text-gray-700 line-clamp-2">{event.evidence}</p>
 
                 <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
-                  <span>Severity: {event.severity}/10</span>
-                  <span>{event.filing_type}</span>
-                  <span>Item {event.item_number}</span>
+                  {filingType && <span>{filingType}</span>}
+                  {itemNumber && <span>Item {itemNumber}</span>}
                 </div>
+
+                {/* Days to next signal indicator */}
+                {showDaysToNext && daysToNext !== null && index < events.length - 1 && (
+                  <div className="mt-3 flex items-center">
+                    <div className="flex-1 h-px bg-gray-200" />
+                    <span className={`mx-2 px-2 py-0.5 rounded-full text-xs font-medium ${
+                      daysToNext <= 30 ? "bg-red-100 text-red-700" :
+                      daysToNext <= 90 ? "bg-orange-100 text-orange-700" :
+                      "bg-gray-100 text-gray-600"
+                    }`}>
+                      {daysToNext} days to next signal
+                    </span>
+                    <div className="flex-1 h-px bg-gray-200" />
+                  </div>
+                )}
               </div>
             </div>
           );

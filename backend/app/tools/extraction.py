@@ -2,17 +2,20 @@
 
 import asyncio
 import re
+import random
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 import json
 
 from app.config import get_settings
 from app.prompts.extraction import (
     EXTRACT_8K_PROMPT,
     EXTRACT_10K_GOING_CONCERN_PROMPT,
+    EXTRACT_10K_ITEMS_PROMPT,
     SIGNAL_TYPES,
 )
+from app.tools.edgar import edgar_client, Filing
 from app.tools.embeddings import embedding_service
 from app.services.supabase_service import supabase_service
 from app.core.logging import get_logger
@@ -29,6 +32,8 @@ class ExtractedSignal:
     confidence: float
     evidence: str  # Verbatim from source
     marker_phrase: str  # What LLM identified
+    summary: str  # Plain English explanation
+    key_facts: List[str]  # Key facts extracted
     event_date: Optional[str]
     filing_date: str
     person: Optional[str]
@@ -52,9 +57,9 @@ class SignalExtractor:
     def __init__(
         self,
         model: str = "gpt-4o-mini",
-        max_concurrent: int = 5,
+        max_concurrent: int = 3,
         max_filing_chars: int = 50000,
-        evidence_context_chars: int = 300,  # Chars before/after marker
+        evidence_context_chars: int = 600,  # Chars before/after marker
     ):
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model = model
@@ -65,6 +70,29 @@ class SignalExtractor:
     def _get_semaphore(self) -> asyncio.Semaphore:
         """Create a new semaphore for the current event loop."""
         return asyncio.Semaphore(self.max_concurrent)
+
+    async def _call_with_retry(self, messages: List[Dict], max_retries: int = 5) -> Optional[str]:
+        """Call OpenAI API with exponential backoff retry on rate limit."""
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                    max_tokens=2000,
+                )
+                return response.choices[0].message.content
+            except RateLimitError as e:
+                if attempt < max_retries - 1:
+                    # Exponential backoff with jitter
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Rate limited, waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Rate limit exceeded after {max_retries} retries")
+                    raise
+        return None
 
     def _clean_html(self, text: str) -> str:
         """Remove HTML tags and clean up text."""
@@ -278,18 +306,13 @@ class SignalExtractor:
                     filing_text=clean_text,
                 )
 
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": "You are an expert SEC filing analyst. Extract signals with VERBATIM marker phrases. Return valid JSON only."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                    max_tokens=2000,
-                )
-
-                content = response.choices[0].message.content
+                messages = [
+                    {"role": "system", "content": "You are an expert SEC filing analyst. Extract signals with VERBATIM marker phrases. Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ]
+                content = await self._call_with_retry(messages)
+                if not content:
+                    return []
                 result = json.loads(content)
 
                 # Step 3: For each signal, find verbatim evidence
@@ -315,8 +338,10 @@ class SignalExtractor:
                         signal_type=sig["type"],
                         severity=min(10, max(1, sig.get("severity", 5))),
                         confidence=min(1.0, max(0.0, sig.get("confidence", 0.8))),
-                        evidence=evidence[:500],  # Cap at 500 chars
+                        evidence=evidence[:1200],  # Cap at 1200 chars
                         marker_phrase=marker_phrase,
+                        summary=sig.get("summary", ""),
+                        key_facts=sig.get("key_facts", []),
                         event_date=sig.get("event_date") or filing_date,
                         filing_date=filing_date,
                         person=sig.get("person"),
@@ -401,18 +426,13 @@ class SignalExtractor:
                     excerpt_text=excerpt,
                 )
 
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": "You are an expert SEC filing analyst. Return valid JSON only."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.1,
-                    max_tokens=500,
-                )
-
-                content = response.choices[0].message.content
+                messages = [
+                    {"role": "system", "content": "You are an expert SEC filing analyst. Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ]
+                content = await self._call_with_retry(messages)
+                if not content:
+                    return []
                 result = json.loads(content)
 
                 if not result.get("has_going_concern"):
@@ -440,8 +460,10 @@ class SignalExtractor:
                     signal_type="GOING_CONCERN",
                     severity=min(10, max(1, sig.get("severity", 9))),
                     confidence=min(1.0, max(0.0, sig.get("confidence", 0.9))),
-                    evidence=evidence[:500],
+                    evidence=evidence[:1200],
                     marker_phrase=marker_phrase,
+                    summary="The company's auditor or management expressed substantial doubt about its ability to continue as a going concern.",
+                    key_facts=["Substantial doubt about ability to continue operations"],
                     event_date=filing_date,
                     filing_date=filing_date,
                     person=None,
@@ -457,6 +479,142 @@ class SignalExtractor:
             except Exception as e:
                 logger.error(f"Error extracting going concern from 10-K: {e}")
                 return []
+
+    async def extract_from_10k_items(
+        self,
+        filing_data: Dict[str, Any],
+        company_name: str,
+        semaphore: asyncio.Semaphore,
+        ticker: str = "",
+        cik: str = "",
+    ) -> List[ExtractedSignal]:
+        """
+        Extract signals from 10-K using structured item extraction (edgar-crawler approach).
+
+        Extracts Items 7 (MD&A), 8 (Financials), 9A (Controls) and sends to LLM.
+        This finds: GOING_CONCERN, MATERIAL_WEAKNESS, RESTRUCTURING, etc.
+        """
+        async with semaphore:
+            try:
+                accession = filing_data.get("accession_number", "")
+                filing_date = filing_data.get("filed_at", "")
+
+                # Check if we already have extracted items
+                items_text = filing_data.get("raw_text", "")
+                extracted_items = filing_data.get("extracted_items", [])
+
+                # If no extracted items, try to extract them now
+                if not extracted_items and cik:
+                    logger.info(f"Extracting items from 10-K {accession} using edgar-crawler approach")
+
+                    # Create Filing object for edgar client
+                    filing = Filing(
+                        accession_number=accession,
+                        filing_type="10-K",
+                        filed_at=filing_date,
+                        primary_doc=filing_data.get("primary_doc", ""),
+                        url=filing_data.get("url", ""),
+                        items=[],
+                        cik=cik,
+                    )
+
+                    # Use edgar client to download with item extraction
+                    result = edgar_client.download_filing_with_items(filing, extract_items=True)
+
+                    if result.get("error"):
+                        logger.error(f"Error extracting items from 10-K: {result['error']}")
+                        # Fall back to old going concern method
+                        return await self.extract_going_concern_from_10k(
+                            filing_data, company_name, semaphore, ticker, cik
+                        )
+
+                    items_text = result.get("raw_text", "")
+                    extracted_items = result.get("extracted_items", [])
+
+                    if extracted_items:
+                        logger.info(f"Extracted items {extracted_items} from 10-K {accession}")
+
+                if not items_text or len(items_text) < 500:
+                    logger.warning(f"No items extracted from 10-K {accession}")
+                    return []
+
+                # Truncate if too long (combined items can be large)
+                max_items_chars = 80000
+                if len(items_text) > max_items_chars:
+                    logger.info(f"Truncating 10-K items from {len(items_text)} to {max_items_chars} chars")
+                    items_text = items_text[:max_items_chars] + "\n... [truncated]"
+
+                clean_text = self._clean_html(items_text)
+
+                # Embed for evidence verification
+                await self._embed_and_store_filing(
+                    accession, clean_text, ticker, cik, "10-K"
+                )
+
+                # Use new 10-K items prompt
+                prompt = EXTRACT_10K_ITEMS_PROMPT.format(
+                    company_name=company_name,
+                    filing_date=filing_date,
+                    accession_number=accession,
+                    items_text=clean_text,
+                )
+
+                messages = [
+                    {"role": "system", "content": "You are an expert SEC filing analyst. Extract signals with VERBATIM marker phrases. Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ]
+
+                content = await self._call_with_retry(messages)
+                if not content:
+                    return []
+
+                result = json.loads(content)
+
+                # Process extracted signals
+                signals = []
+                for sig in result.get("signals", []):
+                    if sig.get("type") not in SIGNAL_TYPES:
+                        logger.warning(f"Unknown signal type from 10-K: {sig.get('type')}")
+                        continue
+
+                    marker_phrase = sig.get("marker_phrase", "")
+                    if not marker_phrase:
+                        logger.warning(f"No marker phrase for 10-K signal {sig.get('type')}")
+                        continue
+
+                    # Find verbatim evidence
+                    evidence, verified = await self._find_verbatim_evidence(
+                        marker_phrase=marker_phrase,
+                        filing_accession=accession,
+                        source_text=clean_text,
+                    )
+
+                    signals.append(ExtractedSignal(
+                        signal_type=sig["type"],
+                        severity=min(10, max(1, sig.get("severity", 7))),
+                        confidence=min(1.0, max(0.0, sig.get("confidence", 0.85))),
+                        evidence=evidence[:1200],
+                        marker_phrase=marker_phrase,
+                        summary=sig.get("summary", ""),
+                        key_facts=sig.get("key_facts", []),
+                        event_date=sig.get("event_date") or filing_date,
+                        filing_date=filing_date,
+                        person=None,
+                        item_number=sig.get("item_number", ""),
+                        filing_accession=accession,
+                        filing_type="10-K",
+                        evidence_verified=verified,
+                    ))
+
+                logger.info(f"Extracted {len(signals)} signals from 10-K {accession} using item extraction")
+                return signals
+
+            except Exception as e:
+                logger.error(f"Error extracting from 10-K items: {e}")
+                # Fall back to old going concern method
+                return await self.extract_going_concern_from_10k(
+                    filing_data, company_name, semaphore, ticker, cik
+                )
 
     async def extract_from_filings(
         self,
@@ -488,7 +646,8 @@ class SignalExtractor:
 
             elif filing_type == "10-K":
                 ten_k_count += 1
-                tasks.append(self.extract_going_concern_from_10k(
+                # Use new item-based extraction (edgar-crawler approach)
+                tasks.append(self.extract_from_10k_items(
                     filing, company_name, semaphore, ticker, cik
                 ))
 

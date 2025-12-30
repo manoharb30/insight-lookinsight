@@ -129,7 +129,7 @@ class SupabaseService:
             ticker: Stock ticker
             cik: Company CIK
             company_name: Company name
-            result: Analysis result dict
+            result: Analysis result dict (facts only, no scores)
             ttl_days: Time to live in days
 
         Returns:
@@ -141,7 +141,6 @@ class SupabaseService:
                 "cik": cik,
                 "company_name": company_name,
                 "status": "completed",
-                "risk_score": result.get("risk_score", 0),
                 "signal_count": result.get("signal_count", 0),
                 "result": json.dumps(result),
                 "expires_at": (datetime.utcnow() + timedelta(days=ttl_days)).isoformat(),
@@ -162,7 +161,7 @@ class SupabaseService:
         message: Optional[str] = None,
         result: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Update the status of an analysis."""
+        """Update the status of an analysis (facts only, no scores)."""
         try:
             data = {
                 "status": status,
@@ -172,7 +171,6 @@ class SupabaseService:
                 data["message"] = message
             if result:
                 data["result"] = json.dumps(result)
-                data["risk_score"] = result.get("risk_score", 0)
                 data["signal_count"] = result.get("signal_count", 0)
 
             self.client.table("analyses").update(data).eq("id", analysis_id).execute()

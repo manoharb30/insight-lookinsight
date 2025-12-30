@@ -360,19 +360,29 @@ class SECEdgarClient:
             logger.error(f"Error parsing filing index {index_url}: {e}")
             return None
 
-    def find_exhibit_urls(self, index_url: str) -> List[Dict[str, str]]:
+    def find_exhibit_urls(
+        self,
+        index_url: str,
+        exhibit_prefixes: List[str] = None,
+    ) -> List[Dict[str, str]]:
         """
-        Find exhibit URLs (EX-99.x) in a filing's index page.
+        Find exhibit URLs in a filing's index page.
 
         8-K filings often have press releases in EX-99.1 exhibits that contain
         the actual signal content (restructuring announcements, layoffs, etc.).
+        EX-10.x exhibits contain material contracts (credit agreements, etc.).
 
         Args:
             index_url: URL to the filing index page
+            exhibit_prefixes: List of exhibit prefixes to look for (default: ["EX-99"])
+                              e.g., ["EX-99", "EX-10"] for press releases and contracts
 
         Returns:
             List of {type, url} for each exhibit found
         """
+        if exhibit_prefixes is None:
+            exhibit_prefixes = ["EX-99"]
+
         exhibits = []
         try:
             html = self._request_html(index_url)
@@ -387,8 +397,8 @@ class SECEdgarClient:
                         if len(cols) >= 4:
                             doc_type = cols[3].get_text(strip=True)
 
-                            # Look for EX-99.x exhibits (press releases, etc.)
-                            if doc_type.startswith("EX-99"):
+                            # Look for exhibits matching any of the prefixes
+                            if any(doc_type.startswith(prefix) for prefix in exhibit_prefixes):
                                 link_tag = cols[2].find("a")
                                 if link_tag and link_tag.get("href"):
                                     href = link_tag["href"]
@@ -507,6 +517,110 @@ class SECEdgarClient:
         except Exception as e:
             logger.error(f"Error getting filings: {e}")
             raise SECEdgarError(f"Failed to get filings: {e}")
+
+    def get_latest_filing_date(
+        self,
+        ticker: str,
+        filing_types: List[str] = None,
+    ) -> Optional[str]:
+        """
+        Get the date of the most recent filing for a ticker.
+
+        This is a lightweight check that doesn't download filing content.
+
+        Args:
+            ticker: Stock ticker symbol
+            filing_types: List of filing types to check (default: 8-K, 10-K)
+
+        Returns:
+            Date string (YYYY-MM-DD) of most recent filing, or None if no filings
+        """
+        if filing_types is None:
+            filing_types = ["8-K", "10-K"]
+
+        try:
+            cik = self.ticker_to_cik(ticker)
+            url = SEC_SUBMISSIONS.format(cik=cik)
+            data = self._request(url)
+
+            recent_filings = data.get("filings", {}).get("recent", {})
+            if not recent_filings:
+                return None
+
+            forms = recent_filings.get("form", [])
+            filing_dates = recent_filings.get("filingDate", [])
+
+            # Find the most recent filing of the specified types
+            for form, date in zip(forms, filing_dates):
+                if form in filing_types:
+                    logger.debug(f"Latest {form} filing for {ticker}: {date}")
+                    return date
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting latest filing date for {ticker}: {e}")
+            return None
+
+    def has_new_filings_since(
+        self,
+        ticker: str,
+        since_date: str,
+        filing_types: List[str] = None,
+    ) -> bool:
+        """
+        Check if there are new filings since a given date.
+
+        Args:
+            ticker: Stock ticker symbol
+            since_date: Date string (YYYY-MM-DD) to check from
+            filing_types: List of filing types to check (default: 8-K, 10-K)
+
+        Returns:
+            True if new filings exist since the given date
+        """
+        if filing_types is None:
+            filing_types = ["8-K", "10-K"]
+
+        try:
+            # Parse the since_date
+            if "T" in since_date:
+                since_date = since_date.split("T")[0]
+            since_dt = datetime.strptime(since_date, "%Y-%m-%d")
+
+            cik = self.ticker_to_cik(ticker)
+            url = SEC_SUBMISSIONS.format(cik=cik)
+            data = self._request(url)
+
+            recent_filings = data.get("filings", {}).get("recent", {})
+            if not recent_filings:
+                return False
+
+            forms = recent_filings.get("form", [])
+            filing_dates = recent_filings.get("filingDate", [])
+
+            # Count new filings
+            new_count = 0
+            for form, date in zip(forms, filing_dates):
+                if form not in filing_types:
+                    continue
+                try:
+                    filing_dt = datetime.strptime(date, "%Y-%m-%d")
+                    if filing_dt > since_dt:
+                        new_count += 1
+                        logger.debug(f"New {form} filing for {ticker}: {date}")
+                except ValueError:
+                    continue
+
+            if new_count > 0:
+                logger.info(f"Found {new_count} new filings for {ticker} since {since_date}")
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error checking new filings for {ticker}: {e}")
+            return False  # Assume no new filings on error (safe default)
 
     def download_filing(self, filing: Filing) -> Dict[str, Any]:
         """
@@ -854,12 +968,28 @@ class SECEdgarClient:
                 # 8-K filings: include main body + exhibits
                 combined_parts = [full_text]
 
-                # Download EX-99.x exhibits (press releases with actual signal content)
+                # Determine which exhibit types to fetch based on 8-K items
+                # Debt-related items get EX-10.x (credit agreements, amendments)
+                DEBT_RELATED_ITEMS = {"2.04", "1.02", "1.01", "2.03"}
+                has_debt_items = bool(set(filing.items) & DEBT_RELATED_ITEMS)
+
+                if has_debt_items:
+                    exhibit_prefixes = ["EX-99", "EX-10"]
+                    logger.info(f"Debt-related 8-K (items: {filing.items}) - fetching EX-99 + EX-10 exhibits")
+                else:
+                    exhibit_prefixes = ["EX-99"]
+
+                # Download exhibits
                 if filing.cik:
                     index_url = self.get_filing_index_url(filing.cik, filing.accession_number)
-                    exhibits = self.find_exhibit_urls(index_url)
+                    exhibits = self.find_exhibit_urls(index_url, exhibit_prefixes)
 
-                    for exhibit in exhibits[:3]:  # Limit to first 3 exhibits
+                    # Separate by type for controlled inclusion
+                    ex99_exhibits = [e for e in exhibits if e["type"].startswith("EX-99")]
+                    ex10_exhibits = [e for e in exhibits if e["type"].startswith("EX-10")]
+
+                    # Include up to 3 EX-99.x (press releases)
+                    for exhibit in ex99_exhibits[:3]:
                         exhibit_text = self.download_exhibit(exhibit["url"])
                         if exhibit_text and len(exhibit_text) > 100:
                             combined_parts.append(
@@ -867,8 +997,21 @@ class SECEdgarClient:
                             )
                             logger.debug(f"Added exhibit {exhibit['type']}: {len(exhibit_text)} chars")
 
-                    if len(exhibits) > 0:
-                        result["exhibits_included"] = [e["type"] for e in exhibits[:3]]
+                    # Include up to 2 EX-10.x (contracts) - truncated to 30k chars each
+                    for exhibit in ex10_exhibits[:2]:
+                        exhibit_text = self.download_exhibit(exhibit["url"])
+                        if exhibit_text and len(exhibit_text) > 100:
+                            # Truncate long contracts to key sections
+                            if len(exhibit_text) > 30000:
+                                exhibit_text = exhibit_text[:30000] + "\n... [truncated - full agreement available in SEC filing]"
+                            combined_parts.append(
+                                f"\n\n{'='*60}\n{exhibit['type']}: MATERIAL CONTRACT/AGREEMENT\n{'='*60}\n\n{exhibit_text}"
+                            )
+                            logger.debug(f"Added exhibit {exhibit['type']}: {len(exhibit_text)} chars")
+
+                    included = [e["type"] for e in ex99_exhibits[:3]] + [e["type"] for e in ex10_exhibits[:2]]
+                    if included:
+                        result["exhibits_included"] = included
 
                 # Combine and truncate
                 combined_text = "\n\n".join(combined_parts)

@@ -113,11 +113,25 @@ it is NOT a BANKRUPTCY_FILING. Do not extract it as such.
       "severity": 1-10,
       "confidence": 0.0-1.0,
       "marker_phrase": "EXACT 10-25 word phrase copied verbatim from filing that identifies this signal",
+      "summary": "1-2 sentence plain English explanation of what happened and why it matters",
+      "key_facts": ["fact 1", "fact 2", "fact 3"],
       "event_date": "YYYY-MM-DD or null if not specified",
       "person": "Name and Title if applicable, or null"
     }}
   ]
 }}
+
+## FIELD GUIDELINES
+
+**summary**: Write a clear, informative 1-2 sentence explanation that a non-expert investor could understand.
+- Good: "The company disclosed it may be unable to repay $200M in convertible notes due June 2025, and is exploring debt restructuring options."
+- Bad: "Debt default risk mentioned."
+
+**key_facts**: Extract 2-4 specific facts with numbers, dates, names, or percentages:
+- "$200M convertible notes due June 1, 2025"
+- "Workforce reduction of 2,500 employees (12% of workforce)"
+- "CEO John Smith resigned effective January 15, 2025"
+- "Material weakness in revenue recognition controls"
 
 ## MARKER PHRASE EXAMPLES
 
@@ -202,6 +216,88 @@ NEGATIVE (NOT a going concern signal - do not extract):
 Analyze carefully. If going concern warning exists, provide a VERBATIM marker phrase.
 """
 
+
+# =============================================================================
+# 10-K ITEM-BASED EXTRACTION PROMPT - FOR STRUCTURED ITEMS
+# =============================================================================
+
+EXTRACT_10K_ITEMS_PROMPT = """You are an expert SEC filing analyst. Extract bankruptcy warning signals from these 10-K sections.
+
+## FILING INFORMATION
+Company: {company_name}
+Filing Date: {filing_date}
+Accession Number: {accession_number}
+
+## 10-K SECTION CONTEXT
+You are analyzing extracted sections from a 10-K annual report:
+- Item 7 (MD&A): Discusses financial condition, liquidity, restructuring plans
+- Item 8 (Financial Statements): Contains auditor report with going concern opinions
+- Item 9A (Controls): Discloses material weaknesses in internal controls
+
+## SIGNAL TYPES TO EXTRACT
+
+1. GOING_CONCERN - Auditor or management expresses "substantial doubt about ability to continue as a going concern"
+2. MATERIAL_WEAKNESS - "Material weakness in internal control over financial reporting" disclosed in Item 9A
+3. RESTRUCTURING - Formal restructuring plans, workforce reductions, facility closures mentioned in MD&A
+4. MASS_LAYOFFS - Workforce reduction >10% or >100 employees
+5. DEBT_DEFAULT - Missed payments, acceleration events, events of default
+6. COVENANT_VIOLATION - Loan covenant breach or waiver requests
+7. AUDITOR_CHANGE - Change in independent auditor
+8. CREDIT_DOWNGRADE - Rating agency downgrade mentioned
+9. ASSET_SALE - Sale of significant assets or business segments
+10. SEC_INVESTIGATION - SEC subpoena, enforcement action, or investigation disclosed
+
+## CRITICAL INSTRUCTIONS
+
+1. For each signal, provide a MARKER PHRASE - a unique 10-25 word phrase COPIED EXACTLY from the text
+2. The marker phrase must be VERBATIM - copy it exactly as it appears
+3. Include which Item/section the signal came from
+4. If NO signals found, return empty array
+5. Be thorough - check ALL provided sections
+
+## RESPONSE FORMAT (JSON)
+
+{{
+  "signals": [
+    {{
+      "type": "SIGNAL_TYPE",
+      "item_number": "Item 9A" or "Item 7" or "Item 8",
+      "severity": 1-10,
+      "confidence": 0.0-1.0,
+      "marker_phrase": "EXACT 10-25 word phrase copied verbatim from filing",
+      "summary": "1-2 sentence plain English explanation of what happened and why it matters",
+      "key_facts": ["fact 1", "fact 2", "fact 3"],
+      "event_date": "YYYY-MM-DD or null"
+    }}
+  ]
+}}
+
+## FIELD GUIDELINES
+
+**summary**: Write a clear, informative 1-2 sentence explanation that a non-expert investor could understand.
+- Good: "The company raised substantial doubt about its ability to continue operations, citing $4.5B accumulated deficit and ongoing cash burn."
+- Bad: "Going concern mentioned."
+
+**key_facts**: Extract 2-4 specific facts with numbers, dates, names, or percentages:
+- "$4.5 billion accumulated deficit as of December 31, 2023"
+- "Cash burn expected to continue through 2025"
+- "Material weakness in internal controls over financial reporting"
+- "Workforce reduction of 15% announced"
+
+Severity scale:
+- 1-3: Minor/routine
+- 4-6: Moderate concern
+- 7-8: Significant risk
+- 9-10: Critical/immediate bankruptcy risk
+
+## 10-K SECTIONS
+
+{items_text}
+
+## END OF SECTIONS
+
+Extract all signals with VERBATIM marker phrases. Return {{"signals": []}} if none found.
+"""
 
 # Keep old prompt name for backward compatibility
 SIGNAL_EXTRACTION_PROMPT = EXTRACT_8K_PROMPT

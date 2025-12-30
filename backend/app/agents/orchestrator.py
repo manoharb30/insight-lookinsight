@@ -1,4 +1,7 @@
-"""Multi-agent orchestrator for the analysis pipeline."""
+"""Multi-agent orchestrator for the analysis pipeline.
+
+Facts-only approach: NO risk scores, NO predictions.
+"""
 
 from typing import Dict, Any
 from datetime import datetime
@@ -6,8 +9,8 @@ from datetime import datetime
 from app.agents.fetcher import fetcher_agent
 from app.agents.extractor import extractor_agent
 from app.agents.validator import validator_agent
-from app.agents.scorer import scorer_agent
 from app.agents.reporter import reporter_agent
+from app.services.neo4j_sync_service import neo4j_sync_service
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -17,13 +20,13 @@ class AnalysisPipeline:
     """
     Orchestrates the multi-agent analysis pipeline.
 
-    Simplified pipeline:
-    1. Fetch 8-K + 10-K only (no 10-Q)
+    Facts-only pipeline (NO SCORING):
+    1. Fetch 8-K + 10-K only
     2. LLM extraction on full filings
     3. Deduplicate (type + date)
     4. Validate
-    5. Score
-    6. Report
+    5. Sync to Neo4j (facts only)
+    6. Generate report (facts only)
     """
 
     def __init__(self, job_id: str, jobs_store: Dict):
@@ -55,14 +58,14 @@ class AnalysisPipeline:
         )
 
     async def run(self, ticker: str) -> Dict[str, Any]:
-        """Run the full analysis pipeline."""
+        """Run the full analysis pipeline - facts only."""
         try:
             # Stage 1: Fetch 8-K + 10-K filings (0-25%)
             self._update_job("fetching", "Fetching SEC filings (8-K + 10-K only)...", 5)
 
             fetch_result = await fetcher_agent.run(
                 ticker=ticker,
-                months_back=36,
+                months_back=24,
                 update_callback=self._update_callback,
             )
 
@@ -121,23 +124,30 @@ class AnalysisPipeline:
 
             validated_signals = validation_result.validated_signals
 
-            # Stage 4: Calculate risk score (80-90%)
-            self._update_job("scoring", "Calculating risk score...", 85)
+            # Stage 4: Sync to Neo4j (80-90%) - FACTS ONLY
+            self._update_job("syncing", "Syncing to timeline graph...", 85)
 
-            risk_assessment = await scorer_agent.run(
-                ticker=ticker,
-                signals=validated_signals,
-                update_callback=self._update_callback,
-            )
+            try:
+                sync_result = await neo4j_sync_service.sync_from_analysis(
+                    ticker=ticker,
+                    company_data={
+                        "cik": fetch_result.cik,
+                        "name": fetch_result.company_name,
+                        "status": "ACTIVE",
+                    },
+                    signals=validated_signals,
+                )
+                self._update_job(
+                    "syncing",
+                    f"Synced {sync_result.get('signals_created', 0)} signals to Neo4j",
+                    90,
+                    signals_found=validation_result.total_validated,
+                )
+            except Exception as e:
+                logger.warning(f"Neo4j sync error (non-fatal): {e}")
+                sync_result = {"error": str(e)}
 
-            self._update_job(
-                "scoring",
-                f"Risk score: {risk_assessment.risk_score}/100 ({risk_assessment.risk_level})",
-                90,
-                signals_found=validation_result.total_validated,
-            )
-
-            # Stage 5: Generate report (90-100%)
+            # Stage 5: Generate report (90-100%) - FACTS ONLY
             self._update_job("reporting", "Generating report...", 95)
 
             report = await reporter_agent.run(
@@ -146,7 +156,6 @@ class AnalysisPipeline:
                 company_name=fetch_result.company_name,
                 signals=validated_signals,
                 rejected_signals=validation_result.rejected_signals,
-                risk_assessment=risk_assessment,
                 filings_analyzed=fetch_result.total_filings,
                 update_callback=self._update_callback,
             )
@@ -162,6 +171,13 @@ class AnalysisPipeline:
                 "validated_signals": validation_result.total_validated,
                 "signals_by_type": validation_result.signals_by_type,
             }
+
+            # Add sync info
+            if "error" not in sync_result:
+                result["neo4j_sync"] = {
+                    "signals_synced": sync_result.get("signals_created", 0),
+                    "going_concern_status": sync_result.get("going_concern_status"),
+                }
 
             return result
 

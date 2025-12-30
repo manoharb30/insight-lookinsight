@@ -17,6 +17,7 @@ from app.tasks import (
     set_running_job_for_ticker,
 )
 from app.services.supabase_service import supabase_service
+from app.tools.edgar import edgar_client
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -50,11 +51,27 @@ async def start_analysis(request: AnalyzeRequest):
     # Check cache first (completed analysis in Supabase)
     cached = await supabase_service.get_cached_analysis(ticker)
     if cached and cached.get("status") == "completed":
-        return AnalyzeResponse(
-            job_id=cached["id"],
-            status="completed",
-            cached=True,
-        )
+        # Check if there are new SEC filings since the analysis was cached
+        analyzed_at = cached.get("analyzed_at") or cached.get("created_at")
+        if analyzed_at:
+            has_new = edgar_client.has_new_filings_since(ticker, analyzed_at)
+            if has_new:
+                logger.info(f"New filings found for {ticker} since {analyzed_at}, invalidating cache")
+                # Don't return cached - continue to start fresh analysis
+            else:
+                logger.info(f"No new filings for {ticker}, returning cached analysis")
+                return AnalyzeResponse(
+                    job_id=cached["id"],
+                    status="completed",
+                    cached=True,
+                )
+        else:
+            # No analyzed_at date, return cached anyway
+            return AnalyzeResponse(
+                job_id=cached["id"],
+                status="completed",
+                cached=True,
+            )
 
     # Check if there's already a running job for this ticker
     existing_job_id = get_running_job_for_ticker(ticker)

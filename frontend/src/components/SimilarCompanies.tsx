@@ -1,6 +1,6 @@
 "use client";
 
-import { SimilarCompany } from "@/lib/types";
+import { SimilarCompany, GOING_CONCERN_STATUS } from "@/lib/types";
 import Link from "next/link";
 
 interface SimilarCompaniesProps {
@@ -20,11 +20,20 @@ export function SimilarCompanies({ companies }: SimilarCompaniesProps) {
     switch (status) {
       case "BANKRUPT":
         return "bg-red-100 text-red-800";
-      case "DISTRESSED":
-        return "bg-orange-100 text-orange-800";
       default:
-        return "bg-green-100 text-green-800";
+        return "bg-gray-100 text-gray-800";
     }
+  };
+
+  const getGCBadge = (gcStatus: string | undefined) => {
+    if (!gcStatus) return null;
+    const display = GOING_CONCERN_STATUS[gcStatus];
+    if (!display) return null;
+    return (
+      <span className={`px-2 py-0.5 rounded text-xs font-medium ${display.color}`}>
+        GC: {display.label}
+      </span>
+    );
   };
 
   return (
@@ -36,15 +45,12 @@ export function SimilarCompanies({ companies }: SimilarCompaniesProps) {
           className="block bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow"
         >
           <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               <span className="font-bold text-lg">{company.ticker}</span>
               <span className={`px-2 py-0.5 rounded text-xs font-medium ${getStatusBadge(company.status)}`}>
                 {company.status}
               </span>
-            </div>
-            <div className="text-right">
-              <div className="text-2xl font-bold text-gray-800">{company.risk_score}</div>
-              <div className="text-xs text-gray-500">Risk Score</div>
+              {getGCBadge(company.going_concern_status)}
             </div>
           </div>
 
@@ -52,10 +58,10 @@ export function SimilarCompanies({ companies }: SimilarCompaniesProps) {
 
           <div className="flex items-center justify-between text-sm">
             <div className="text-gray-500">
-              {company.common_signals} common signals
+              {company.common_signals} overlapping signals
             </div>
             <div className="text-blue-600 font-medium">
-              {Math.round(company.similarity_score * 100)}% similar
+              {Math.round(company.similarity_score * 100)}% overlap
             </div>
           </div>
 

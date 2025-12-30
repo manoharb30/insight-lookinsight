@@ -109,10 +109,17 @@ def deduplicate_signals(signals: List[Dict[str, Any]]) -> DeduplicationResult:
 
     for signal_type, type_signals in by_type.items():
         if signal_type in ONGOING_SIGNAL_TYPES:
-            # Keep only earliest occurrence
-            if type_signals:
-                unique_signals.append(type_signals[0])
-                type_counts[signal_type] = 1
+            # For timeline: keep one per year (not just earliest)
+            kept_by_year = {}
+            for signal in type_signals:
+                date_str = signal.get("date", "")
+                year = date_str[:4] if date_str else "unknown"
+                if year not in kept_by_year:
+                    kept_by_year[year] = signal
+                elif signal.get("severity", 0) > kept_by_year[year].get("severity", 0):
+                    kept_by_year[year] = signal
+            unique_signals.extend(kept_by_year.values())
+            type_counts[signal_type] = len(kept_by_year)
         else:
             # Discrete: keep signals >90 days apart
             kept = []

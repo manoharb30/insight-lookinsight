@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import get_settings
-from app.api.routes import analyze, company, health
+from app.api.routes import analyze, company, health, timeline
 from app.services.neo4j_service import neo4j_service
 from app.services.supabase_service import supabase_service
 
@@ -49,6 +49,7 @@ app.add_middleware(
 app.include_router(health.router, tags=["Health"])
 app.include_router(analyze.router, prefix=settings.api_v1_prefix, tags=["Analysis"])
 app.include_router(company.router, prefix=settings.api_v1_prefix, tags=["Company"])
+app.include_router(timeline.router, prefix=settings.api_v1_prefix, tags=["Timeline"])
 
 
 @app.get("/")

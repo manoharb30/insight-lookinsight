@@ -4,8 +4,8 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { AnalysisResult, StreamUpdate, SIGNAL_DISPLAY, PatternMatch } from "@/lib/types";
-import { RiskGauge, SignalTimeline, SimilarCompanies, ProcessingStages } from "@/components";
+import { AnalysisResult, StreamUpdate, SIGNAL_DISPLAY, GOING_CONCERN_STATUS, PatternMatch } from "@/lib/types";
+import { TimelineContext, SignalTimeline, SimilarCompanies, ProcessingStages } from "@/components";
 
 type Stage = {
   name: string;
@@ -17,7 +17,7 @@ const INITIAL_STAGES: Stage[] = [
   { name: "Fetching SEC filings", status: "pending" },
   { name: "Extracting signals", status: "pending" },
   { name: "Validating signals", status: "pending" },
-  { name: "Calculating risk score", status: "pending" },
+  { name: "Syncing to timeline", status: "pending" },
   { name: "Generating report", status: "pending" },
 ];
 
@@ -42,7 +42,7 @@ export default function AnalysisPage() {
         fetching: 0,
         extracting: 1,
         validating: 2,
-        scoring: 3,
+        syncing: 3,
         reporting: 4,
       };
 
@@ -72,7 +72,6 @@ export default function AnalysisPage() {
       try {
         await api.cancelAnalysis(jobIdRef.current);
       } catch (e) {
-        // Ignore errors during cancellation
         console.log("Cancel request failed (may have already completed):", e);
       }
     }
@@ -85,12 +84,10 @@ export default function AnalysisPage() {
 
     const startAnalysis = async () => {
       try {
-        // Start analysis
         const response = await api.startAnalysis(ticker);
         jobIdRef.current = response.job_id;
 
         if (response.cached) {
-          // Get cached result
           isCompletedRef.current = true;
           const cachedResult = await api.getJobStatus(response.job_id);
           if (cachedResult.result) {
@@ -101,7 +98,6 @@ export default function AnalysisPage() {
           }
         }
 
-        // Subscribe to SSE stream
         cleanup = api.subscribeToStream(
           response.job_id,
           (update) => {
@@ -126,10 +122,8 @@ export default function AnalysisPage() {
       }
     };
 
-    // Handle browser close/refresh
     const handleBeforeUnload = () => {
       if (jobIdRef.current && !isCompletedRef.current) {
-        // Use sendBeacon for reliable delivery on page unload
         navigator.sendBeacon(
           `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/analyze/${jobIdRef.current}/cancel`
         );
@@ -137,10 +131,8 @@ export default function AnalysisPage() {
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
-
     startAnalysis();
 
-    // Cleanup on unmount (navigation away)
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
       if (cleanup) cleanup();
@@ -186,6 +178,9 @@ export default function AnalysisPage() {
     return null;
   }
 
+  const gcStatus = result.going_concern_status || "NEVER";
+  const gcDisplay = GOING_CONCERN_STATUS[gcStatus] || GOING_CONCERN_STATUS.NEVER;
+
   return (
     <main className="min-h-screen bg-gray-50">
       {/* Navigation */}
@@ -210,44 +205,75 @@ export default function AnalysisPage() {
               <div className="flex items-center gap-3 mb-2">
                 <h1 className="text-3xl font-bold">{result.ticker}</h1>
                 <span
-                  className={`px-3 py-1 rounded-full text-sm font-medium ${
-                    result.status === "BANKRUPT"
-                      ? "bg-red-100 text-red-800"
-                      : result.status === "DISTRESSED"
-                      ? "bg-orange-100 text-orange-800"
-                      : "bg-green-100 text-green-800"
-                  }`}
+                  className={`px-3 py-1 rounded-full text-sm font-medium ${gcDisplay.color}`}
                 >
-                  {result.status}
+                  GC: {gcDisplay.label}
                 </span>
               </div>
               <p className="text-xl text-gray-600">{result.company_name}</p>
               <p className="text-sm text-gray-400 mt-1">CIK: {result.cik}</p>
             </div>
-            <RiskGauge score={result.risk_score} level={result.risk_level} size="large" />
+            <TimelineContext
+              goingConcernStatus={gcStatus}
+              goingConcernFirstSeen={result.going_concern_first_seen}
+              goingConcernLastSeen={result.going_concern_last_seen}
+              firstSignalDate={result.first_signal_date}
+              lastSignalDate={result.last_signal_date}
+              daysSinceLastSignal={result.days_since_last_signal}
+              signalCount={result.signal_count}
+              size="medium"
+            />
           </div>
         </div>
 
-        {/* Executive Summary */}
-        <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
-          <h2 className="text-xl font-bold mb-4">Executive Summary</h2>
-          <p className="text-gray-700 leading-relaxed">{result.executive_summary}</p>
-
-          {result.key_risks && result.key_risks.length > 0 && (
-            <div className="mt-4">
-              <h3 className="font-semibold mb-2">Key Risk Factors:</h3>
-              <ul className="list-disc list-inside space-y-1 text-gray-600">
-                {result.key_risks.map((risk, i) => (
-                  <li key={i}>{risk}</li>
-                ))}
-              </ul>
+        {/* Going Concern Alert */}
+        {gcStatus === "ACTIVE" && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6 mb-6">
+            <div className="flex items-start gap-4">
+              <div className="flex-shrink-0 w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+                <svg className="w-6 h-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-red-800 mb-1">Active Going Concern Warning</h3>
+                <p className="text-red-700">
+                  This company has an active going concern warning in its SEC filings.
+                  {result.going_concern_first_seen && (
+                    <> First detected: {new Date(result.going_concern_first_seen).toLocaleDateString()}.</>
+                  )}
+                </p>
+              </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* Bankruptcy Pattern Match */}
+        {/* Going Concern Removed - Positive Signal */}
+        {gcStatus === "REMOVED" && (
+          <div className="bg-green-50 border border-green-200 rounded-xl p-6 mb-6">
+            <div className="flex items-start gap-4">
+              <div className="flex-shrink-0 w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-green-800 mb-1">Going Concern Removed</h3>
+                <p className="text-green-700">
+                  Going concern warning was removed in the latest annual filing - a positive development.
+                  {result.going_concern_last_seen && (
+                    <> Last seen: {new Date(result.going_concern_last_seen).toLocaleDateString()}.</>
+                  )}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Historical Pattern Match (kept as informational, not predictive) */}
         {result.bankruptcy_pattern_match && (
-          <BankruptcyPatternCard match={result.bankruptcy_pattern_match} />
+          <HistoricalPatternCard match={result.bankruptcy_pattern_match} />
         )}
 
         <div className="grid lg:grid-cols-3 gap-6">
@@ -256,71 +282,59 @@ export default function AnalysisPage() {
             {/* Signal Summary */}
             <div className="bg-white rounded-xl shadow-lg p-6">
               <h2 className="text-xl font-bold mb-4">
-                Signal Summary ({result.signal_count} signals)
+                Detected Signals ({result.signal_count})
               </h2>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                {Object.entries(result.signal_summary).map(([type, count]) => {
-                  const display = SIGNAL_DISPLAY[type] || { label: type, color: "gray" };
-                  return (
-                    <div
-                      key={type}
-                      className={`p-3 rounded-lg border ${
-                        display.color === "red"
-                          ? "bg-red-50 border-red-200"
-                          : display.color === "orange"
-                          ? "bg-orange-50 border-orange-200"
-                          : display.color === "yellow"
-                          ? "bg-yellow-50 border-yellow-200"
-                          : "bg-gray-50 border-gray-200"
-                      }`}
-                    >
-                      <div className="font-semibold text-lg">{count}</div>
-                      <div className="text-sm text-gray-600">{display.label}</div>
-                    </div>
-                  );
-                })}
-              </div>
+              {result.signal_count === 0 ? (
+                <p className="text-gray-500">No distress signals detected in analyzed filings.</p>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  {Object.entries(result.signal_summary).map(([type, count]) => {
+                    const display = SIGNAL_DISPLAY[type] || { label: type, color: "gray" };
+                    return (
+                      <div
+                        key={type}
+                        className={`p-3 rounded-lg border ${
+                          display.color === "red"
+                            ? "bg-red-50 border-red-200"
+                            : display.color === "orange"
+                            ? "bg-orange-50 border-orange-200"
+                            : display.color === "yellow"
+                            ? "bg-yellow-50 border-yellow-200"
+                            : "bg-gray-50 border-gray-200"
+                        }`}
+                      >
+                        <div className="font-semibold text-lg">{count}</div>
+                        <div className="text-sm text-gray-600">{display.label}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Timeline */}
             <div className="bg-white rounded-xl shadow-lg p-6">
               <h2 className="text-xl font-bold mb-4">Signal Timeline</h2>
-              <SignalTimeline events={result.timeline} />
+              {result.timeline.length > 0 ? (
+                <SignalTimeline events={result.timeline} />
+              ) : (
+                <p className="text-gray-500">No timeline events to display.</p>
+              )}
             </div>
-
-            {/* Risk Breakdown */}
-            {result.risk_breakdown && result.risk_breakdown.length > 0 && (
-              <div className="bg-white rounded-xl shadow-lg p-6">
-                <h2 className="text-xl font-bold mb-4">Risk Breakdown</h2>
-                <div className="space-y-3">
-                  {result.risk_breakdown.map((item, i) => (
-                    <div key={i}>
-                      <div className="flex justify-between mb-1">
-                        <span className="font-medium">{item.category}</span>
-                        <span className="text-gray-600">
-                          {item.signals} signals ({item.percentage}%)
-                        </span>
-                      </div>
-                      <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-blue-600 rounded-full"
-                          style={{ width: `${item.percentage}%` }}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
 
           {/* Sidebar */}
           <div className="space-y-6">
-            {/* Similar Companies */}
-            <div className="bg-white rounded-xl shadow-lg p-6">
-              <h2 className="text-xl font-bold mb-4">Similar Companies</h2>
-              <SimilarCompanies companies={result.similar_companies} />
-            </div>
+            {/* Similar Companies (historical comparison only) */}
+            {result.similar_companies && result.similar_companies.length > 0 && (
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <h2 className="text-xl font-bold mb-4">Similar Historical Cases</h2>
+                <p className="text-sm text-gray-500 mb-4">
+                  Companies with overlapping signal patterns (for reference only)
+                </p>
+                <SimilarCompanies companies={result.similar_companies} />
+              </div>
+            )}
 
             {/* Analysis Metadata */}
             <div className="bg-white rounded-xl shadow-lg p-6">
@@ -354,12 +368,14 @@ export default function AnalysisPage() {
             </div>
 
             {/* Disclaimer */}
-            <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
-              <h3 className="font-semibold text-yellow-800 mb-2">Disclaimer</h3>
-              <p className="text-xs text-yellow-700">
-                This analysis is for informational purposes only and does not constitute financial
-                advice. Past patterns do not guarantee future outcomes. Always consult with a
-                qualified financial advisor before making investment decisions.
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+              <h3 className="font-semibold text-blue-800 mb-2">About This Analysis</h3>
+              <p className="text-xs text-blue-700">
+                This analysis presents factual information extracted from SEC filings.
+                We do not provide risk scores, predictions, or investment advice.
+                All signals are sourced directly from public SEC filings.
+                You should interpret this data yourself and consult with qualified
+                professionals before making any decisions.
               </p>
             </div>
           </div>
@@ -369,38 +385,29 @@ export default function AnalysisPage() {
   );
 }
 
-function BankruptcyPatternCard({ match }: { match: PatternMatch }) {
+function HistoricalPatternCard({ match }: { match: PatternMatch }) {
   return (
-    <div className="bg-red-50 border border-red-200 rounded-xl p-6 mb-6">
+    <div className="bg-gray-50 border border-gray-200 rounded-xl p-6 mb-6">
       <div className="flex items-start gap-4">
-        <div className="flex-shrink-0 w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
-          <svg
-            className="w-6 h-6 text-red-600"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-            />
+        <div className="flex-shrink-0 w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
+          <svg className="w-6 h-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
           </svg>
         </div>
         <div className="flex-grow">
-          <h3 className="text-lg font-bold text-red-800 mb-1">Bankruptcy Pattern Match</h3>
-          <p className="text-red-700 mb-3">
-            Signal pattern shows <strong>{Math.round(match.similarity_score * 100)}% similarity</strong>{" "}
-            to {match.company_name} ({match.matched_company}) prior to its bankruptcy filing on{" "}
-            {match.bankruptcy_date}.
+          <h3 className="text-lg font-bold text-gray-800 mb-1">Historical Pattern Reference</h3>
+          <p className="text-gray-600 mb-3">
+            Signal pattern has {Math.round(match.similarity_score * 100)}% overlap with
+            {" "}{match.company_name} ({match.matched_company}), which filed for bankruptcy
+            on {match.bankruptcy_date}.
+          </p>
+          <p className="text-xs text-gray-500 mb-3">
+            This is historical data for reference only - not a prediction.
           </p>
           <div className="flex flex-wrap gap-2">
             {match.matching_signals.map((signal, i) => (
-              <span
-                key={i}
-                className="px-2 py-1 bg-red-100 text-red-800 text-sm rounded"
-              >
+              <span key={i} className="px-2 py-1 bg-gray-200 text-gray-700 text-sm rounded">
                 {signal.replace(/_/g, " ")}
               </span>
             ))}

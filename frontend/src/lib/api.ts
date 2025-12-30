@@ -1,6 +1,6 @@
 // API Client for SEC Insights Backend
 
-import { AnalyzeResponse, JobStatus, AnalysisResult, StreamUpdate } from "./types";
+import { AnalyzeResponse, JobStatus, AnalysisResult, StreamUpdate, CompanyTimeline, GoingConcernHistory, SimilarCase } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -151,6 +151,36 @@ class APIClient {
    */
   async cancelAnalysis(jobId: string): Promise<{ job_id: string; cancelled: boolean; message: string }> {
     return this.fetch(`/api/v1/analyze/${jobId}/cancel`, {
+      method: "POST",
+    });
+  }
+
+  /**
+   * Get company timeline from Neo4j
+   */
+  async getTimeline(ticker: string): Promise<CompanyTimeline> {
+    return this.fetch<CompanyTimeline>(`/api/v1/timeline/${ticker.toUpperCase()}`);
+  }
+
+  /**
+   * Get going concern history
+   */
+  async getGoingConcernHistory(ticker: string): Promise<GoingConcernHistory> {
+    return this.fetch<GoingConcernHistory>(`/api/v1/timeline/${ticker.toUpperCase()}/going-concern`);
+  }
+
+  /**
+   * Get similar historical cases
+   */
+  async getSimilarCases(ticker: string): Promise<SimilarCase[]> {
+    return this.fetch<SimilarCase[]>(`/api/v1/timeline/${ticker.toUpperCase()}/similar`);
+  }
+
+  /**
+   * Sync company to Neo4j (runs analysis and stores in graph)
+   */
+  async syncToTimeline(ticker: string): Promise<{ status: string; signals_stored: number }> {
+    return this.fetch(`/api/v1/timeline/${ticker.toUpperCase()}/sync`, {
       method: "POST",
     });
   }
