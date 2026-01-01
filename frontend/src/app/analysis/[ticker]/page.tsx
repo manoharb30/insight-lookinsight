@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { AnalysisResult, StreamUpdate, SIGNAL_DISPLAY, GOING_CONCERN_STATUS, PatternMatch } from "@/lib/types";
+import { AnalysisResult, StreamUpdate, SIGNAL_DISPLAY, GOING_CONCERN_STATUS, PatternMatch, SimilarCase } from "@/lib/types";
 import { TimelineContext, SignalTimeline, SimilarCompanies, ProcessingStages } from "@/components";
 
 type Stage = {
@@ -30,6 +30,7 @@ export default function AnalysisPage() {
   const [stages, setStages] = useState<Stage[]>(INITIAL_STAGES);
   const [signalsFound, setSignalsFound] = useState(0);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [similarCases, setSimilarCases] = useState<SimilarCase[]>([]);
   const jobIdRef = useRef<string | null>(null);
   const isCompletedRef = useRef(false);
 
@@ -139,6 +140,15 @@ export default function AnalysisPage() {
       cancelAnalysis();
     };
   }, [ticker, updateStageFromMessage, cancelAnalysis]);
+
+  // Fetch similar cases from Neo4j when analysis completes
+  useEffect(() => {
+    if (result && ticker) {
+      api.getSimilarCases(ticker)
+        .then(setSimilarCases)
+        .catch((err) => console.log("Could not fetch similar cases:", err));
+    }
+  }, [result, ticker]);
 
   if (error) {
     return (
@@ -326,13 +336,50 @@ export default function AnalysisPage() {
           {/* Sidebar */}
           <div className="space-y-6">
             {/* Similar Companies (historical comparison only) */}
-            {result.similar_companies && result.similar_companies.length > 0 && (
+            {similarCases && similarCases.length > 0 && (
               <div className="bg-white rounded-xl shadow-lg p-6">
                 <h2 className="text-xl font-bold mb-4">Similar Historical Cases</h2>
                 <p className="text-sm text-gray-500 mb-4">
                   Companies with overlapping signal patterns (for reference only)
                 </p>
-                <SimilarCompanies companies={result.similar_companies} />
+                <div className="space-y-3">
+                  {similarCases.map((company, index) => (
+                    <Link
+                      key={index}
+                      href={`/analysis/${company.ticker}`}
+                      className="block bg-gray-50 rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-lg">{company.ticker}</span>
+                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                            company.outcome === "BANKRUPT" ? "bg-red-100 text-red-800" : "bg-gray-100 text-gray-800"
+                          }`}>
+                            {company.outcome}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-sm text-gray-600 mb-2">{company.name}</div>
+                      <div className="text-sm text-gray-500 mb-2">
+                        {company.overlap_count} overlapping signals
+                      </div>
+                      {company.matching_signals && company.matching_signals.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {company.matching_signals.slice(0, 3).map((type, i) => (
+                            <span key={i} className="px-2 py-0.5 bg-gray-200 text-gray-600 text-xs rounded">
+                              {type.replace(/_/g, " ")}
+                            </span>
+                          ))}
+                          {company.matching_signals.length > 3 && (
+                            <span className="px-2 py-0.5 bg-gray-200 text-gray-600 text-xs rounded">
+                              +{company.matching_signals.length - 3} more
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </Link>
+                  ))}
+                </div>
               </div>
             )}
 
